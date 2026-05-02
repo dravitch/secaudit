@@ -1,0 +1,32 @@
+# Résultats — JAMAIS publics
+results/*
+!results/.gitkeep
+*.findings.json
+*_report.md
+*_report.json
+
+# Secrets
+.env
+.env.*
+config/secrets.py
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# NixOS
+.direnv/
+result
+result-*
+
+# Éditeurs
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
