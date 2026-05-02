@@ -1,0 +1,25 @@
+# config/scope.yaml
+# Cibles autorisées — modifier avant chaque engagement
+
+authorized_targets:
+  - host: "telemo.gov.gn"
+    protocol: "https"
+    sprint_max: 5          # tous les sprints autorisés
+    notes: "Portail marchés publics Guinée — audit passif uniquement"
+
+# Cibles de test local (toujours autorisées)
+  - host: "127.0.0.1"
+    protocol: "http"
+    sprint_max: 5
+    notes: "DVWA local pour tests"
+
+  - host: "localhost"
+    protocol: "http"
+    sprint_max: 5
+    notes: "Tests unitaires"
+
+# Règles globales
+rules:
+  active_scan_requires_explicit: true   # Sprint 2+ nécessite confirmation
+  results_public: false                  # Jamais de résultats dans le repo
+  results_dir: "./results"               # Local uniquement
