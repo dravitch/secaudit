@@ -575,3 +575,66 @@ Génère `README.md` avec :
 
 *Ce fichier est le point d'entrée de chaque session Claude Code.
 Lis-le en entier avant toute action. Respecte l'ordre des sessions (§9).*
+
+-------------------------------------------------------------------
+19 h 15
+Claude a répondu : Session 1 parfaite — 9/9, env NixOS propre, uv à 37 packages en 12ms.
+
+Session 1 parfaite — 9/9, env NixOS propre, uv à 37 packages en 12ms. Le contrat API tient.
+
+Avant de dire go pour Session 2, un point de clarification rapide :
+
+En attendant ta réponse, voici ce que Session 2 va produire concrètement pour que tu saches quoi reviewer dans la PR :
+
+tools/recon.py — nmap via subprocess sur le(s) port(s) 80/443, output XML parsé, 1 Finding par port ouvert avec evidence = la ligne nmap brute. Test : test_recon.py mocke subprocess avec respx-style patch.
+
+tools/scanner.py — 60 headers analysés via httpx, chaque header manquant ou mal configuré → 1 Finding. La liste des headers vient d'une constante dans le fichier, pas d'un outil externe. Ça garde la dépendance à zéro et le code auditable.
+
+Ce qui ne sera PAS dans Session 2 : testssl.sh (c'est Session 3 / Sprint 2 DNS+TLS), phishing surface (Session 4). On reste strict sur l'ordre du CLAUDE.md.
+
+Dis-moi tes choix et je donne le go à Claude Code.
+
+-------------------------------------------------------------------
+
+## PROMPT #2
+
+Session 2 — Sprint 1 (CLAUDE.md §9)
+
+Implémente tools/recon.py et tools/scanner.py dans cet ordre strict :
+
+1. tools/recon.py
+   - Wrapper nmap via subprocess (pas de librairie python-nmap)
+   - Scan ports 80 et 443, output XML parsé avec xml.etree
+   - 1 Finding par port ouvert, severity selon port (443=LOW/INFO, autre=MEDIUM)
+   - evidence = ligne nmap brute exacte
+   - Vérifier scope.yaml avant tout scan (rejeter si cible absente)
+   - CLI : python tools/recon.py --target <host> --output results/<file>.json
+
+2. tests/test_recon.py
+   - Mocker subprocess.run pour éviter un vrai nmap
+   - Tester : port ouvert → Finding valide, port fermé → liste vide,
+     cible hors scope → ValueError, output JSON roundtrip avec Finding schema
+   - pytest tests/test_recon.py -v → GREEN obligatoire avant d'aller plus loin
+
+3. tools/scanner.py
+   - Analyse HTTP headers via httpx (primary) + subprocess curl (fallback si timeout >10s)
+   - 60 headers analysés (liste exhaustive dans le fichier comme constante HEADERS_CHECKS)
+   - 1 Finding par header absent ou mal configuré
+   - evidence = valeur brute du header ou "header absent" + méthode (httpx|curl)
+   - severity : CSP absent=HIGH, X-Frame-Options absent=MEDIUM, Server exposé=LOW, etc.
+   - CLI : python tools/scanner.py --target https://<host> --output results/<file>.json
+
+4. tests/test_scanner.py
+   - Mocker httpx.get avec respx
+   - Tester : header absent → Finding severity correct, header présent → pas de Finding,
+     httpx timeout → fallback curl déclenché, output conforme schema
+   - pytest tests/ -v → tous GREEN
+
+5. Exécuter sur telemo.gov.gn (dans scope.yaml ✓)
+   python tools/recon.py --target telemo.gov.gn --output results/s1_recon_telemo.json
+   python tools/scanner.py --target https://telemo.gov.gn --output results/s1_headers_telemo.json
+   Afficher un résumé console (rich table) : N findings, severity breakdown
+
+6. Commit : "feat(s1): recon + HTTP surface tools"
+   NE PAS commiter results/ (gitignore actif)
+   PR mise à jour ou nouvelle PR selon workflow actuel
