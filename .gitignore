@@ -8,6 +8,7 @@ results/*
 # Secrets
 .env
 .env.*
+!.env.example
 config/secrets.py
 
 # Python

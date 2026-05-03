@@ -211,6 +211,12 @@ def parse_testssl_text(text: str, target: str) -> list[Finding]:
                         "Certificate expires in <30 days",
                         f"Le certificat expire dans {days} jours — planifier le renouvellement.",
                     ))
+                else:
+                    findings.append(_make_tls_finding(
+                        target, line, "INFO",
+                        f"Certificate valid — {days} days",
+                        f"Certificat valide pour encore {days} jour(s) — pas d'alerte.",
+                    ))
 
         # HSTS detection (deduped — testssl prints both an HTTP-headers line
         # and a Grade-capped synthesis line). Note: "offered" is a substring

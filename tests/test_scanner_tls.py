@@ -82,12 +82,29 @@ def _fake_proc(stdout: str, returncode: int = 0, stderr: str = ""):
 # ── Pure parser tests (no subprocess at all) ────────────────────────────
 
 
-def test_strict_tls_yields_no_findings():
+def test_strict_tls_yields_only_cert_valid_info():
+    """Modern strict TLS produces a single INFO 'cert valid' finding when
+    the cert window is healthy (>=30 days). Per Session 5 §0 spec:
+    'Doit retourner ... Finding INFO Certificate valid — ~69 days (pas d'alerte, >30j)'."""
     findings = _tls.parse_testssl_text(TESTSSL_OK, target=TARGET)
-    assert findings == [], (
-        "Strict TLS 1.3 + valid cert + HSTS preload should yield 0 findings; "
-        "got: " + ", ".join(f.title for f in findings)
+    assert len(findings) == 1, (
+        f"Expected 1 INFO cert finding, got {len(findings)}: "
+        + ", ".join(f.title for f in findings)
     )
+    assert findings[0].severity == "INFO"
+    assert findings[0].title.startswith("Certificate valid")
+    assert "84" in findings[0].finding
+
+
+def test_cert_remaining_69_days_yields_info():
+    """Real telemo.gov.gn cert (Let's Encrypt E8, valid 69 days per ground
+    truth manuel 2026-05-03)."""
+    text = " Certificate Validity (UTC)   69 >= 60 days (2026-05-03 --> 2026-07-12)\n"
+    findings = _tls.parse_testssl_text(text, target=TARGET)
+    cert = [f for f in findings if "Certificate valid" in f.title]
+    assert len(cert) == 1
+    assert cert[0].severity == "INFO"
+    assert "69" in cert[0].finding
 
 
 def test_sslv3_offered_yields_critical():
