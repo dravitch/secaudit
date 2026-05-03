@@ -763,3 +763,338 @@ Fournir :
 ```
 
 ---------------------------------------------------
+
+Audit Sprint 2 — ✅ GO Session 4, avec 1 écart à corriger en priorité
+Ce qui est solide
+65/65 sur NixOS natif — la reproduction sur ta machine confirme que le code tourne dans l'environnement cible réel, pas seulement dans le sandbox Claude Code. C'est la validation qui compte.
+DNS ground truth excellent — DNSSEC absent (CRITICAL), DMARC p=none (HIGH), MX Outlook avec CHAIN_DEPENDENCY. Trois findings propres, evidence = sortie dig brute exacte. La découverte SPF/DKIM valides est importante : ça confirme que c'est la politique DMARC p=none qui est le problème, pas l'absence de SPF. Le CriticAgent devra noter cette nuance.
+Corrections Sprint 1 bien implémentées — _apply_chain_dependency() et détection Imperva sont des additions qui vont être utiles dès Sprint 3 (le WAF change la surface clonable).
+
+L'écart à corriger en Session 4 — BLOQUANT pour la qualité du rapport final
+TLS : 1 finding sur ta machine vs 3 dans le sandbox Claude Code.
+Le sandbox retournait HSTS HIGH + cert MEDIUM + TLS1.2 LOW. Ta machine NixOS retourne seulement TLS1.2 LOW.
+Ce n'est pas un bug du code — c'est une divergence de version testssl.sh. Le sandbox avait une version apt qui formate différemment de la version NixOS. Les parsers regex de _tls.py sont écrits pour le format apt, pas pour le format NixOS.
+C'est exactement le problème fondateur du projet : un outil retourne un résultat qui ne reflète pas la réalité. Mindset 1 — Ground Truth or Silence.
+Ce que Claude Code doit faire en Session 4 avant toute autre chose :
+
+# Dans nix-shell, capturer l'output brut réel
+testssl.sh telemo.gov.gn 2>/dev/null > results/testssl_raw_nixos.txt
+
+Puis ajuster les regex du parser sur ce ground truth NixOS. Le certificat expire dans 29 jours — si le finding MEDIUM disparaît sur ta machine, c'est un faux négatif sérieux sur une cible réelle.
+
+
+
+
+
+
+
+
+
+
+
+### PROMPT #4 — Session 4 — Sprint 3+4 (CLAUDE.md §9)
+
+Commencer par corriger le parser TLS (1 finding NixOS vs 3 sandbox),
+puis implémenter tools/phishing_surface.py.
+
+── CORRECTION PRIORITAIRE : TLS parser NixOS ──────────────────────────────
+
+0. Ground truth d'abord (Mindset 1) :
+   Exécuter depuis nix-shell et sauvegarder l'output brut :
+   testssl.sh telemo.gov.gn 2>/dev/null > results/testssl_raw_nixos.txt
+   cat results/testssl_raw_nixos.txt
+
+   Le fichier est en .gitignore (results/). Ne pas commiter.
+
+   Analyser cet output pour trouver :
+   - La ligne HSTS (format exact NixOS testssl)
+   - La ligne cert expiration (format exact NixOS testssl)
+   - Toute différence de format avec les regex actuelles de tools/_tls.py
+
+   Corriger tools/_tls.py pour matcher le format NixOS réel.
+   Ajouter tests de régression pour chaque nouvelle forme détectée.
+   Re-exécuter : python tools/scanner.py --target telemo.gov.gn --mode tls
+   → doit retourner au moins le finding cert expiration MEDIUM (29 jours)
+   → HSTS absent doit apparaître si testssl NixOS le signale
+
+   pytest tests/ -v → tous GREEN avant de continuer.
+
+── SPRINT 3 : tools/phishing_surface.py ───────────────────────────────────
+
+1. Login page parser (BeautifulSoup + httpx, passif uniquement)
+   - Récupérer la page principale + /connexion /login /auth (tester les 3,
+     s'arrêter au premier 200)
+   - Extraire : URL du formulaire login, champs input (name, type, id),
+     action attribute, méthode (GET/POST)
+   - Finding MEDIUM "Login form identified" avec evidence = HTML brut du form
+   - Finding HIGH si méthode=GET (credentials en URL)
+   - Finding INFO si action pointe vers domaine externe
+
+2. Assets externes + SRI checker
+   - Parser tous les <script src>, <link href>, <img src> de la page login
+   - Pour chaque asset externe (hors telemo.gov.gn) :
+     · Vérifier attribut integrity= (SRI)
+     · Finding HIGH si script externe sans SRI (injection JS possible)
+     · Finding MEDIUM si stylesheet externe sans SRI
+     · Evidence = tag HTML brut
+   - Finding MEDIUM "N external assets, 0 SRI-protected" synthèse globale
+     avec flag CHAIN_DEPENDENCY si N > 0
+
+3. Détection WAF/CDN (enrichissement finding Imperva Sprint 1)
+   - Si ipmsperf_uuid détecté (déjà flagué CONTEXT_DEPENDENT en Sprint 1) :
+     · Ajouter finding INFO "WAF Imperva/Incapsula détecté"
+     · Note dans evidence : "présence WAF peut masquer certains headers
+       et modifier la surface clonable réelle"
+     · Flag CONTEXT_DEPENDENT
+
+4. Favicon + fingerprinting visuel
+   - Tenter GET /favicon.ico et /favicon.png
+   - Si accessible : Finding INFO "Favicon accessible" + SHA256 du contenu
+     en evidence (hash = empreinte visuelle pour clone)
+   - Si 404 : Finding INFO "Favicon absent — clonage visuel plus difficile"
+
+5. CLI :
+   python tools/phishing_surface.py --target https://telemo.gov.gn \
+     --output results/s3_phishing_telemo.json
+
+── SPRINT 4 : Typosquat generator (dans phishing_surface.py) ──────────────
+
+6. Fonction generate_typosquats(domain) → list[str]
+   Générer les variantes suivantes sur la partie avant .gov.gn :
+   - Homoglyphes : l→1, o→0, e→3, a→@ (limiter à substitutions simples)
+   - Insertion tiret : te-lemo, tel-emo, tele-mo, telem-o
+   - Suppression niveau : telemo.gn (sans .gov)
+   - Ajout préfixe/suffixe : www-telemo, telemo-portail, telemo-connect
+   - Gouvernement variant : telemo.gouv.gn
+   Maximum 15 variantes. Pas d'appel DNS — génération pure, passif.
+
+7. Pour chaque variante :
+   - Finding HIGH "Typosquat domain variant: <variante>"
+   - Severity HIGH (vecteur phishing direct)
+   - Evidence = règle de transformation appliquée
+   - Flag PHISHING_VECTOR
+
+8. Finding synthèse CRITICAL "N typosquat variants identified — phishing
+   delivery surface" avec liste des variantes en evidence.
+   Flag PHISHING_VECTOR + CHAIN_DEPENDENCY (lié SPF/DMARC Sprint 2).
+
+── TESTS ───────────────────────────────────────────────────────────────────
+
+9. tests/test_phishing_surface.py
+   Mocker httpx avec respx pour tous les tests.
+   Couvrir :
+   - Login form trouvé → Finding MEDIUM correct
+   - Form GET → Finding HIGH
+   - Script externe sans SRI → Finding HIGH
+   - Script externe avec SRI → pas de finding
+   - Favicon accessible → Finding INFO avec hash
+   - Favicon 404 → Finding INFO "absent"
+   - Typosquat : tester generate_typosquats("telemo.gov.gn") → ≥10 variantes
+   - Typosquat synthèse → Finding CRITICAL
+   - Out-of-scope → ValueError avant tout GET
+
+   pytest tests/ -v → 65 + N nouveaux = tous GREEN
+
+── EXÉCUTION LIVE ──────────────────────────────────────────────────────────
+
+10. python tools/phishing_surface.py --target https://telemo.gov.gn \
+      --output results/s3_phishing_telemo.json
+    Afficher résumé rich table.
+    results/ non commités.
+
+── LIVRER ──────────────────────────────────────────────────────────────────
+
+- Log pytest complet
+- Contenu results/s3_phishing_telemo.json
+- Résumé console rich
+- Confirmation que le parser TLS retourne maintenant ≥2 findings sur
+  telemo.gov.gn depuis nix-shell (cert + HSTS au minimum)
+- Commit : "feat(s3-s4): phishing surface + typosquat + tls parser fix"
+
+
+--------------------------------------------------------
+
+Deux choses à régler avant de donner le go Session 5.
+
+---
+
+## Audit Sprint 3+4 + Correction TLS parser
+
+### Sprint 3+4 — ✅ Solide
+
+17 findings propres, structure JSON conforme, flags PHISHING_VECTOR et CHAIN_DEPENDENCY correctement posés. La variante `telemo.gouv.gn` est particulièrement pertinente — francophone, intuitive, et `.gouv` est le TLD gouvernemental utilisé en Côte d'Ivoire et au Sénégal voisins. Un utilisateur guinéen pourrait s'y laisser prendre.
+
+**Deux observations pour le CriticAgent :**
+
+Le favicon absent est un finding INFO correct, mais le CriticAgent devra noter que la présence du WAF Imperva (finding précédent) peut bloquer `/favicon.ico` activement — ce n'est pas forcément que le favicon n'existe pas, c'est peut-être qu'Imperva le protège. Flag `CONTEXT_DEPENDENT` manquant sur ce finding.
+
+Le finding synthèse CRITICAL "14 variants" avec `CHAIN_DEPENDENCY` est bien posé — mais l'analyste écrit "absence/faiblesse SPF/DMARC" alors que Sprint 2 a montré que SPF est valide. Le CriticAgent devra corriger : c'est DMARC p=none + DNSSEC absent, pas SPF.
+
+---
+
+### TLS parser — Écart confirmé par sslshopper.com
+
+Le ground truth externe est clair : **certificat valide jusqu'au 12 juillet 2026 = 69 jours restants**. Le sandbox Claude Code avait retourné "29 jours" — c'était une donnée de test inventée ou capturée à un autre moment. Ta machine NixOS retourne 1 seul finding TLS1.2 LOW, ce qui signifie que le parser rate HSTS et l'expiration cert.
+
+Pour testssl.sh : pas besoin de le fournir manuellement, il est dans ton `shell.nix` via `pkgs.testssl`. Le problème est qu'il n'est probablement pas résolu dans ton env actuel. Voici la vérification rapide à faire depuis ton nix-shell :
+
+```bash
+which testssl.sh || which testssl
+testssl --version 2>/dev/null || testssl.sh --version 2>/dev/null
+```
+
+Si la commande n'est pas trouvée, c'est que le `shell.nix` actuel utilise `testssl` mais NixOS le package peut s'appeler différemment. La correction est dans `shell.nix`, pas dans le code Python.
+
+---
+
+### Prompt Session 5 — Agents IA (AnalystAgent + CriticAgent) + fix TLS
+
+```
+Session 5 — Sprint 5 (CLAUDE.md §9)
+
+Deux tâches en parallèle : fix testssl.sh NixOS + implémentation des agents IA.
+
+── FIX TESTSSL.SH (Mindset 1 — Ground Truth) ──────────────────────────────
+
+0. Diagnostiquer pourquoi testssl.sh retourne 1 finding au lieu de 3+ :
+
+   a. Vérifier le binaire disponible :
+      which testssl.sh ; which testssl ; testssl --version 2>&1 | head -3
+
+   b. Si testssl non trouvé : vérifier shell.nix — le package NixOS s'appelle
+      "testssl" (pas "testssl.sh"). Corriger shell.nix si nécessaire et
+      relancer nix-shell pour recharger.
+
+   c. Capturer l'output brut complet :
+      testssl telemo.gov.gn > results/testssl_raw_nixos.txt 2>&1
+      cat results/testssl_raw_nixos.txt
+      (results/ est gitignored)
+
+   d. Ground truth sslshopper.com (source externe de référence) :
+      - Cert valide jusqu'au 12 juillet 2026 = ~69 jours
+      - Let's Encrypt E8, ecdsa-with-SHA384
+      - Apache, IP 95.111.253.212
+      Le parser DOIT produire au minimum :
+        · Finding LOW  "TLSv1.2 offered" (déjà présent ✓)
+        · Finding INFO "Certificate valid — 69 days remaining" OU pas de
+          finding si >60j (à définir : seuil warn à 30j, fail à 7j)
+        · Finding HIGH "HSTS not offered" si testssl le confirme
+
+   e. Ajuster les regex de tools/_tls.py sur les lignes réelles de testssl
+      NixOS. Ajouter tests de régression pour chaque forme découverte.
+      pytest tests/ -v → tous GREEN.
+
+   f. Re-run : python tools/scanner.py --target telemo.gov.gn --mode tls
+      → doit matcher le ground truth sslshopper (~69j, pas d'alerte cert)
+
+── AGENTS IA ───────────────────────────────────────────────────────────────
+
+1. agents/analyst_agent.py
+   Utilise ANALYST_SYSTEM_PROMPT du CLAUDE.md §10.
+   Input  : list[Finding] (JSON) avec critic_verdict == "PENDING"
+   Output : list[Finding] avec analyst_conclusion enrichie (si vide ou
+            générique), cvss_score estimé si absent, severity confirmée.
+   Modèle : settings.py → CLAUDE_MODEL_ANALYST (défaut claude-sonnet-4-6)
+   Appel  : client.messages.create() synchrone (pas d'async pour l'instant)
+   Contrainte : si ANTHROPIC_API_KEY absent → lever EnvironmentError claire,
+                pas de fallback silencieux (Mindset 8)
+   Batch  : traiter les findings par groupes de 10 max (token budget)
+   Retourner les Finding originaux avec analyst_conclusion mis à jour,
+   cvss_score ajouté si pertinent. Ne pas modifier critic_verdict.
+
+2. agents/critic_agent.py
+   Utilise CRITIC_SYSTEM_PROMPT du CLAUDE.md §10.
+   Input  : list[Finding] après passage par AnalystAgent
+   Output : list[Finding] avec critic_verdict, critic_rationale,
+            confidence_score, flags mis à jour
+   Modèle : même API, temperature=0 (paramètre explicite dans l'appel)
+   Logique de barrière (classify_finding du CLAUDE.md §11) :
+     confidence ≥ 0.75 + CONFIRMED → "confirmed"
+     confidence 0.50-0.74 ou NUANCED → "investigate"
+     sinon → "rejected"
+   Cas spéciaux à gérer (connus depuis les sprints précédents) :
+     · Favicon absent + WAF Imperva détecté → NUANCED, CONTEXT_DEPENDENT
+       (peut être bloqué par WAF, pas forcément absent)
+     · "14 typosquat variants" synthèse : analyst_conclusion mentionne
+       "absence/faiblesse SPF" mais SPF est valide → corriger en
+       critic_rationale : "SPF valide, risque réel = DMARC p=none +
+       DNSSEC absent. Conclusion partiellement incorrecte."
+       verdict NUANCED, confidence 0.65
+     · DMARC p=none : CONFIRMED 0.90 — politique publiée mais inefficace,
+       vérifiable par dig indépendant
+     · Typosquat variants individuels : CONFIRMED 0.85 — génération
+       déterministe, non-falsifiable sans whois (hors scope passif)
+
+3. Interface commune agents/base.py (optionnel mais propre)
+   class BaseAgent:
+     def __init__(self, model, system_prompt, temperature=1.0)
+     def run(self, findings: list[Finding]) -> list[Finding]
+     def _call_api(self, messages) -> str  # raises EnvironmentError si clé manquante
+
+4. tests/test_agents.py
+   Mocker client.messages.create avec unittest.mock.patch.
+   Tester :
+   - AnalystAgent enrichit analyst_conclusion vide
+   - AnalystAgent ajoute cvss_score si absent
+   - CriticAgent retourne CONFIRMED pour finding à evidence solide
+   - CriticAgent retourne NUANCED pour finding CONTEXT_DEPENDENT
+   - CriticAgent retourne REJECTED pour finding sans evidence
+   - Logique barrière : classify_finding tests (4 cas)
+   - EnvironmentError si ANTHROPIC_API_KEY manquante
+   pytest tests/ -v → 65 + N nouveaux = tous GREEN
+
+── RUN LIVE (si ANTHROPIC_API_KEY disponible) ──────────────────────────────
+
+5. Charger tous les findings des sprints 1-4 depuis results/ :
+   s1_headers_telemo.json + s1_recon_telemo.json +
+   s2_tls_telemo.json + s2_dns_telemo.json +
+   s3_phishing_telemo.json
+
+   python -c "
+   from agents.analyst_agent import AnalystAgent
+   from agents.critic_agent import CriticAgent
+   from schemas.finding import Finding
+   import json, pathlib
+
+   findings = []
+   for f in sorted(pathlib.Path('results').glob('s[1-4]*telemo.json')):
+       findings += [Finding(**x) for x in json.loads(f.read_text())]
+
+   print(f'Loaded {len(findings)} findings')
+   analyst = AnalystAgent()
+   findings = analyst.run(findings)
+   critic = CriticAgent()
+   findings = critic.run(findings)
+
+   confirmed  = [f for f in findings if f.critic_verdict == 'CONFIRMED']
+   nuanced    = [f for f in findings if f.critic_verdict == 'NUANCED']
+   rejected   = [f for f in findings if f.critic_verdict == 'REJECTED']
+   print(f'CONFIRMED={len(confirmed)} NUANCED={len(nuanced)} REJECTED={len(rejected)}')
+
+   out = pathlib.Path('results/s5_critic_telemo.json')
+   out.write_text(json.dumps([f.model_dump(mode=\"json\") for f in findings], indent=2))
+   print(f'Written {out}')
+   "
+
+6. Afficher rich table : verdict × severity breakdown
+   results/s5_critic_telemo.json → gitignored
+
+── LIVRER ──────────────────────────────────────────────────────────────────
+
+- Log pytest complet
+- Output testssl brut NixOS (premiers 50 lignes) + findings TLS corrigés
+- Contenu results/s5_critic_telemo.json (si API key dispo)
+  OU résumé mock du CriticAgent avec verdicts attendus (si pas de clé)
+- Confirmation que classifier_finding fonctionne sur les 36 findings totaux
+- Commit : "feat(s5): AnalystAgent + CriticAgent + testssl NixOS fix"
+```
+
+---
+
+**Note sur ANTHROPIC_API_KEY** : si tu veux éviter de la mettre dans `.env` localement, tu peux la passer en variable d'env inline pour le run live uniquement :
+
+```bash
+ANTHROPIC_API_KEY=sk-ant-xxx python -c "..."
+```
+
+Elle ne sera jamais dans le repo. La session Claude Code cloud l'a déjà via son contexte — le run live est optionnel pour la validation, les tests mockés suffisent pour le GO Session 6.
