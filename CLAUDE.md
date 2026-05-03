@@ -638,3 +638,126 @@ Implémente tools/recon.py et tools/scanner.py dans cet ordre strict :
 6. Commit : "feat(s1): recon + HTTP surface tools"
    NE PAS commiter results/ (gitignore actif)
    PR mise à jour ou nouvelle PR selon workflow actuel
+
+------------------------------------------
+
+Lecture des deux JSON bruts avant tout jugement.Audit complet. Voici le verdict avant de donner le prompt.
+
+---
+
+## Audit Sprint 1 — Verdict : ✅ GO Sprint 2 (TLS/DNS), avec 3 observations à corriger dans la même session
+
+### Ce qui est solide
+
+**Structure JSON** — conforme au schéma Finding à 100%. Tous les champs obligatoires présents, `critic_verdict: PENDING` correct à ce stade, `evidence` contient les valeurs brutes réelles. Le roundtrip Pydantic passera sans friction.
+
+**29/29 tests** — couverture sérieuse, fallback curl testé, scope enforcement vérifié avant subprocess. C'est exactement Mindset 9.
+
+**Résultats réels cohérents** — le scanner a tourné en live sur telemo.gov.gn. Les findings reflètent ce qu'on voit : Apache exposé, JSESSIONID sans SameSite, CSP présente mais permissive.
+
+---
+
+### 3 observations à corriger en Session 3 (pas bloquantes pour avancer, mais à adresser)
+
+**1. HSTS manquant dans le JSON mais présent dans le résumé console**
+Le résumé console dit `HIGH: 2 (HSTS missing, CSP missing)` mais dans le JSON livré il n'y a pas de finding `HSTS missing` — seulement 12 findings dont aucun sur HSTS. Soit il est dans un JSON non livré, soit il y a un bug de sérialisation. Claude Code doit vérifier et corriger.
+
+**2. Deux findings CSP redondants sans flag CHAIN_DEPENDENCY**
+`CSP allows unsafe-inline` et `CSP allows unsafe-eval` partagent exactement la même `evidence` brute — c'est correct techniquement, mais ils devraient porter le flag `CHAIN_DEPENDENCY` l'un vers l'autre. Le CriticAgent le détectera de toute façon, mais autant le marquer dès la source.
+
+**3. `ipmsperf_uuid` — signal fort ignoré**
+Le cookie `Set-Cookie` révèle `ipmsperf_uuid` avec 4 valeurs différentes dans une seule réponse. C'est une signature de load balancer ou de CDN de monitoring (probablement Imperva/Incapsula). Ce n'est pas juste un finding CSRF — c'est une information d'infrastructure critique pour Sprint 3 (phishing surface) et pour comprendre si un WAF est en place. Le scanner doit flaguer `CONTEXT_DEPENDENT` et noter la présence probable d'un WAF/CDN.
+
+**4. Apache sans version** — finding `LOW` correct, mais l'evidence dit juste `Server: Apache` sans version. C'est en fait *mieux* que nginx/1.18.0 du mock dashboard — à noter dans le critic_rationale futur : Apache a masqué sa version, ce qui est une bonne pratique. Le CriticAgent devra nuancer.
+
+---
+### PROMPT #3 — Sprint 2 (TLS + DNS)
+
+```
+Session 3 — Sprint 2 (CLAUDE.md §9)
+
+Implémente tools/scanner.py --mode dns et le wrapper testssl.sh.
+Corrige également les 3 observations de l'audit Sprint 1 avant de commencer.
+
+── CORRECTIONS SPRINT 1 (à faire en premier) ──────────────────────────────
+
+1. Vérifier pourquoi HSTS missing n'apparaît pas dans s1_headers_telemo.json
+   alors que le résumé console l'affiche. Corriger le bug de sérialisation
+   s'il existe, ou confirmer que le finding existe dans un fichier non livré.
+   Ajouter test : test_hsts_completely_missing_yields_high_finding.
+
+2. Sur les findings CSP unsafe-inline + unsafe-eval : ajouter flag
+   CHAIN_DEPENDENCY automatiquement quand deux findings partagent la même
+   evidence source. Implémenter dans tools/scanner.py, couvrir par test.
+
+3. Détecter la signature ipmsperf_uuid dans Set-Cookie → ajouter finding
+   INFO "WAF/CDN détecté (Imperva/Incapsula signature)" avec flag
+   CONTEXT_DEPENDENT. Evidence = les noms de cookies ipmsperf_uuid.
+   Impact : Sprint 3 phishing surface devra tenir compte du WAF.
+
+── SPRINT 2 — TLS ─────────────────────────────────────────────────────────
+
+4. tools/scanner.py --mode tls
+   Wrapper subprocess autour de testssl.sh (disponible via nix-shell).
+   Checks requis :
+   - Protocoles actifs : TLSv1.3 (ok), TLSv1.2 (warn), TLSv1.1 (fail),
+     TLSv1.0 (fail), SSLv3 (critical)
+   - Certificat : expiration (warn si <30j, fail si <7j), Let's Encrypt vs
+     commercial, SAN match
+   - Forward Secrecy : ECDHE présent (ok) vs absent (high)
+   - HSTS preload : vérifier présence dans liste preload Chromium via
+     dig/curl (pas d'appel externe, juste noter absent/présent)
+   - Output : 1 Finding par anomalie, evidence = ligne testssl.sh brute
+   - CLI : python tools/scanner.py --target telemo.gov.gn --mode tls
+           --output results/s2_tls_telemo.json
+
+5. tests/test_scanner_tls.py
+   Mocker subprocess.run (testssl.sh) avec des sorties JSON/texte
+   représentatives. Tester : TLS1.1 détecté → HIGH, TLS1.3 seul → 0
+   findings, cert expirant dans 10j → FAIL, FS absent → HIGH.
+   pytest tests/ -v → 29 + N nouveaux = tous GREEN avant d'aller plus loin.
+
+── SPRINT 2 — DNS ─────────────────────────────────────────────────────────
+
+6. tools/scanner.py --mode dns
+   Checks via subprocess dig (disponible nix-shell) :
+   - DNSSEC : dig +dnssec telemo.gov.gn → DNSKEY présent/absent
+   - SPF : dig TXT telemo.gov.gn | grep v=spf → présent/absent/syntaxe
+   - DMARC : dig TXT _dmarc.telemo.gov.gn → p=reject/quarantine/none/absent
+   - DKIM : dig TXT default._domainkey.telemo.gov.gn → présent/absent
+   - MX : dig MX telemo.gov.gn → serveurs mail identifiés (info phishing)
+   - Severity mapping :
+       DNSSEC absent → CRITICAL
+       SPF absent → CRITICAL
+       DMARC absent → CRITICAL
+       DMARC p=none → HIGH (politique sans effet)
+       DKIM absent → HIGH
+       MX présent → INFO (avec CHAIN_DEPENDENCY sur SPF/DMARC)
+   - CLI : python tools/scanner.py --target telemo.gov.gn --mode dns
+           --output results/s2_dns_telemo.json
+
+7. tests/test_scanner_dns.py
+   Mocker subprocess.run (dig). Tester chaque check en isolation.
+   pytest tests/ -v → tous GREEN.
+
+── EXÉCUTION LIVE ─────────────────────────────────────────────────────────
+
+8. Depuis nix-shell (testssl.sh et dig disponibles) :
+   python tools/scanner.py --target telemo.gov.gn --mode tls \
+     --output results/s2_tls_telemo.json
+   python tools/scanner.py --target telemo.gov.gn --mode dns \
+     --output results/s2_dns_telemo.json
+   Afficher résumé rich table pour chaque run.
+
+9. Commit : "feat(s2): TLS + DNS checks + Sprint 1 corrections"
+   results/ non commités (gitignore).
+   PR mise à jour.
+
+── LIVRER ─────────────────────────────────────────────────────────────────
+
+Fournir :
+- Log pytest complet (tous tests, pas de résumé)
+- Contenu s2_tls_telemo.json
+- Contenu s2_dns_telemo.json
+- Résumé console rich des deux runs
+```
