@@ -1,0 +1,163 @@
+# SecAudit — Rapport `{{ target }}`
+
+> Généré le {{ generated_at }} · {{ total }} finding{{ 's' if total != 1 else '' }} analysés
+
+---
+
+## 1. Résumé exécutif
+
+**Cible :** `{{ target }}`
+**Total findings (post-analyst) :** {{ total }}
+**Taux de désaccord critic :** {{ (disagreement_rate * 100) | round(1) }} %
+
+### Répartition par sévérité
+
+| Sévérité | Count |
+|----------|-------|
+{% for sev in ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'INFO'] -%}
+{% if severity_counts[sev] > 0 -%}
+| **{{ sev }}** | {{ severity_counts[sev] }} |
+{% endif -%}
+{% endfor %}
+
+### Répartition par verdict
+
+| Verdict | Count |
+|---------|-------|
+{% for v in ['CONFIRMED', 'NUANCED', 'REJECTED', 'PENDING'] -%}
+{% if verdict_counts[v] > 0 -%}
+| **{{ v }}** | {{ verdict_counts[v] }} |
+{% endif -%}
+{% endfor %}
+
+---
+
+## 2. Findings confirmés ({{ confirmed | length }})
+
+> Verdict CONFIRMED, confidence ≥ 0.75 — à corriger en priorité.
+
+{% if confirmed | length == 0 -%}
+*Aucun finding confirmé.*
+{% else -%}
+{% for f in confirmed -%}
+### {{ loop.index }}. {{ f.title }} — `{{ f.severity }}`
+
+- **Sprint :** S{{ f.sprint }} · **Outil :** `{{ f.tool }}` · **Cible :** `{{ f.target }}`
+- **Confidence :** {{ (f.confidence_score * 100) | round(0) }} %{% if f.cvss_score %} · **CVSS :** {{ f.cvss_score }}{% endif %}
+{% if f.flags %}- **Flags :** {{ f.flags | join(', ') }}{% endif %}
+{% if f.id in truncated_ids %}- ⚑ **Réponse LLM tronquée (max_tokens atteint)**{% endif %}
+
+**Finding :** {{ f.finding }}
+
+**Analyse :** {{ f.analyst_conclusion }}
+
+**Vérification critic :** {{ f.critic_rationale }}
+
+<details>
+<summary>Evidence</summary>
+
+```
+{% for e in f.evidence -%}
+{{ e }}
+{% endfor -%}
+```
+
+</details>
+
+---
+{% endfor -%}
+{% endif %}
+
+## 3. À investiguer ({{ investigate | length }})
+
+> Verdict NUANCED ou confidence ∈ [0.50, 0.75[ — contexte additionnel requis.
+
+{% if investigate | length == 0 -%}
+*Aucun finding à investiguer.*
+{% else -%}
+{% for f in investigate -%}
+### {{ loop.index }}. {{ f.title }} — `{{ f.severity }}` · `{{ f.critic_verdict }}`
+
+- **Sprint :** S{{ f.sprint }} · **Confidence :** {{ (f.confidence_score * 100) | round(0) }} %
+{% if f.flags %}- **Flags :** {{ f.flags | join(', ') }}{% endif %}
+{% if f.id in truncated_ids %}- ⚑ **Réponse LLM tronquée**{% endif %}
+
+**Finding :** {{ f.finding }}
+
+**Critic :** {{ f.critic_rationale or '_pas de rationale_' }}
+
+<details>
+<summary>Evidence</summary>
+
+```
+{% for e in f.evidence -%}
+{{ e }}
+{% endfor -%}
+```
+
+</details>
+
+---
+{% endfor -%}
+{% endif %}
+
+## 4. Findings rejetés ({{ rejected | length }})
+
+> Verdict REJECTED, ou confidence < 0.50 — preuve insuffisante.
+
+{% if rejected | length == 0 -%}
+*Aucun finding rejeté.*
+{% else -%}
+{% for f in rejected -%}
+- **{{ f.title }}** (S{{ f.sprint }}, {{ f.severity }}) — {{ f.critic_rationale or 'pas de rationale' }}
+{% endfor -%}
+{% endif %}
+
+{% if pending | length > 0 %}
+## 5. Findings en attente ({{ pending | length }})
+
+> Verdict PENDING — agents non exécutés (mode --no-ai) ou erreur LLM.
+
+{% for f in pending -%}
+- **{{ f.title }}** (S{{ f.sprint }}, {{ f.severity }})
+{% endfor %}
+{% endif %}
+
+---
+
+## Annexe technique
+
+### Pipeline metadata
+
+- **Démarré :** {{ metadata.started_at if metadata.started_at else '?' }}
+- **Durée :** {{ metadata.duration_sec if metadata.duration_sec else '?' }} s
+- **Sprints exécutés :** {{ metadata.sprints_requested | join(', ') if metadata.sprints_requested else '?' }}
+- **Mode --no-ai :** {{ 'oui' if metadata.no_ai else 'non' }}
+- **Findings pré-IA :** {{ metadata.findings_pre_ai if metadata.findings_pre_ai is defined else '?' }}
+- **Findings post-IA :** {{ total }}
+
+### Décompte par étape
+
+{% if metadata.counts -%}
+{% for sprint, payload in metadata.counts.items() -%}
+- **{{ sprint }} :** {{ payload }}
+{% endfor -%}
+{% endif %}
+
+### Agents IA
+
+{% if cost -%}
+- **AnalystAgent :** `{{ cost.analyst_model }}` (Anthropic)
+  - Tokens : {{ cost.analyst.input_tokens }} in / {{ cost.analyst.output_tokens }} out{% if cost.analyst.cache_read_tokens %} (cache_read: {{ cost.analyst.cache_read_tokens }}){% endif %}
+  - Coût estimé : ~${{ '%.4f' | format(cost.analyst.cost_usd) }}
+- **CriticAgent :** `{{ cost.critic_model }}` (HF Router → Novita)
+  - Tokens : {{ cost.critic.input_tokens }} in / {{ cost.critic.output_tokens }} out
+  - Coût estimé : ~${{ '%.4f' | format(cost.critic.cost_usd) }}
+- **Coût total estimé :** ~${{ '%.4f' | format(cost.total_cost_usd) }}
+{% else -%}
+*Agents IA non exécutés (mode --no-ai ou pipeline sans S5).*
+{% endif %}
+
+---
+
+*Rapport généré par SecAudit / Mini-Mythos. Voir `CLAUDE.md` pour la méthodologie complète.*

@@ -95,6 +95,12 @@ class AnthropicAnalystAgent(BaseAgent):
 
         self._anthropic = anthropic
         self._client = anthropic.Anthropic()
+        self._total_usage = {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+        }
 
     # ── Public API ──────────────────────────────────────────────────────
 
@@ -139,6 +145,10 @@ class AnthropicAnalystAgent(BaseAgent):
             getattr(b, "text", "") for b in response.content
             if getattr(b, "type", None) == "text"
         ]
+        usage = getattr(response, "usage", None)
+        if usage is not None:
+            for key in self._total_usage:
+                self._total_usage[key] += int(getattr(usage, key, 0) or 0)
         return self._parse_updates("".join(text_blocks))
 
     # ── Update merging (only analyst_conclusion + cvss_score) ───────────

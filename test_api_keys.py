@@ -41,7 +41,7 @@ try:
 except ImportError:
     print("[INFO] 'openai' absent — tentative d'installation automatique...")
     result = subprocess.run(
-        [sys.executable, "-m", "pip", "install", "openai", "--quiet"],
+        [sys.executable, "-m", "uv", "pip", "install", "openai", "--quiet"],
         capture_output=True, text=True
     )
     if result.returncode == 0:
