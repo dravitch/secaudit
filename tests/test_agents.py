@@ -101,7 +101,28 @@ def _install_fake_openai(monkeypatch, response_payload, side_effect=None):
 
 
 def test_analyst_raises_environment_error_when_key_missing(monkeypatch):
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    """EnvironmentError levée si ANTHROPIC_API_KEY absent au moment de
+    l'instanciation.
+
+    Robustesse contre .env autoloadé sur NixOS : monkeypatch.delenv ne
+    suffit pas — l'import de agents.analyst_agent déclenche
+    config.settings → load_dotenv() qui RÉ-INJECTE la clé. On patche
+    plutôt settings.require_env directement (résolu dynamiquement à
+    chaque appel via le module attribute lookup).
+    """
+    from config import settings as cfg_settings
+
+    real = cfg_settings.require_env
+
+    def fake_require_env(var):
+        if var == "ANTHROPIC_API_KEY":
+            raise EnvironmentError(
+                f"Required environment variable {var!r} is not set."
+            )
+        return real(var)
+
+    monkeypatch.setattr(cfg_settings, "require_env", fake_require_env)
+
     from agents.analyst_agent import AnthropicAnalystAgent
 
     with pytest.raises(EnvironmentError, match="ANTHROPIC_API_KEY"):
@@ -227,7 +248,21 @@ def test_analyst_suppresses_known_false_positives_for_telemo(monkeypatch):
 
 
 def test_critic_raises_environment_error_when_token_missing(monkeypatch):
-    monkeypatch.delenv("HF_TOKEN", raising=False)
+    """Same .env-resilient pattern as the analyst test — patch require_env
+    so the test holds whether or not HF_TOKEN is present in .env."""
+    from config import settings as cfg_settings
+
+    real = cfg_settings.require_env
+
+    def fake_require_env(var):
+        if var == "HF_TOKEN":
+            raise EnvironmentError(
+                f"Required environment variable {var!r} is not set."
+            )
+        return real(var)
+
+    monkeypatch.setattr(cfg_settings, "require_env", fake_require_env)
+
     from agents.hf_critic_agent import HFCriticAgent
 
     with pytest.raises(EnvironmentError, match="HF_TOKEN"):
