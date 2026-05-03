@@ -202,3 +202,93 @@ def test_headers_checks_count_at_least_60():
     assert len(scanner.HEADERS_CHECKS) >= 60, (
         f"Expected >=60 checks, got {len(scanner.HEADERS_CHECKS)}"
     )
+
+
+# ── Sprint 1 corrections (Session 3 §1-3) ──────────────────────────────
+
+
+def test_hsts_completely_missing_yields_high_finding():
+    """Regression test for the audit observation #1: confirm HSTS missing
+    is emitted as a HIGH finding and serialized correctly."""
+    headers = dict(STRICT_HEADERS)
+    headers.pop("Strict-Transport-Security")
+    findings = scanner.evaluate_headers(
+        scanner._normalize_headers(headers.items()), target=URL, method="httpx"
+    )
+    hsts = [f for f in findings if f.title == "HSTS header missing"]
+    assert len(hsts) == 1
+    f = hsts[0]
+    assert f.severity == "HIGH"
+    assert f.sprint == 1
+    assert f.tool == "scanner"
+    assert "Strict-Transport-Security" in f.evidence[0]
+    assert "header absent" in f.evidence[0]
+    # Must survive JSON round-trip via the schema.
+    restored = Finding.model_validate_json(f.model_dump_json())
+    assert restored.title == "HSTS header missing"
+    assert restored.severity == "HIGH"
+
+
+def test_chain_dependency_flag_set_for_csp_unsafe_inline_and_eval():
+    """Two findings derived from the same CSP header value must share
+    the CHAIN_DEPENDENCY flag (they have the same root cause)."""
+    headers = dict(STRICT_HEADERS)
+    headers["Content-Security-Policy"] = "default-src 'self' 'unsafe-inline' 'unsafe-eval'"
+    findings = scanner.evaluate_headers(
+        scanner._normalize_headers(headers.items()), target=URL, method="httpx"
+    )
+    csp_findings = [f for f in findings if f.title.startswith("CSP allows")]
+    assert len(csp_findings) == 2
+    titles = {f.title for f in csp_findings}
+    assert titles == {"CSP allows unsafe-inline", "CSP allows unsafe-eval"}
+    for f in csp_findings:
+        assert "CHAIN_DEPENDENCY" in f.flags, (
+            f"missing CHAIN_DEPENDENCY on {f.title}; flags={f.flags}"
+        )
+    # The two findings must point at the same evidence string.
+    assert csp_findings[0].evidence == csp_findings[1].evidence
+
+
+def test_chain_dependency_not_set_for_unrelated_findings():
+    """Findings from distinct headers must NOT receive CHAIN_DEPENDENCY."""
+    headers = dict(STRICT_HEADERS)
+    headers.pop("Content-Security-Policy")  # 1 CSP finding
+    headers["Server"] = "nginx/1.25"        # 1 Server finding
+    findings = scanner.evaluate_headers(
+        scanner._normalize_headers(headers.items()), target=URL, method="httpx"
+    )
+    relevant = [f for f in findings if f.title in {
+        "Content-Security-Policy missing", "Server header exposes software"
+    }]
+    assert len(relevant) == 2
+    for f in relevant:
+        assert "CHAIN_DEPENDENCY" not in f.flags, (
+            f"unexpected CHAIN_DEPENDENCY on {f.title}; evidence={f.evidence}"
+        )
+
+
+def test_imperva_signature_detected_with_context_dependent_flag():
+    """Set-Cookie containing 'ipmsperf_uuid' → INFO finding, CONTEXT_DEPENDENT flag."""
+    headers = dict(STRICT_HEADERS)
+    headers["Set-Cookie"] = (
+        "ipmsperf_uuid=abc-123; Path=/; Secure; HttpOnly; SameSite=Lax"
+    )
+    findings = scanner.evaluate_headers(
+        scanner._normalize_headers(headers.items()), target=URL, method="httpx"
+    )
+    waf = [f for f in findings if "Imperva" in f.title or "Incapsula" in f.title]
+    assert len(waf) == 1
+    f = waf[0]
+    assert f.severity == "INFO"
+    assert "CONTEXT_DEPENDENT" in f.flags
+    assert "ipmsperf_uuid" in f.evidence[0]
+
+
+def test_imperva_signature_not_emitted_when_cookie_clean():
+    """Without ipmsperf_uuid, the Imperva check must NOT fire."""
+    headers = dict(STRICT_HEADERS)
+    headers["Set-Cookie"] = "session=abc; Path=/; Secure; HttpOnly; SameSite=Lax"
+    findings = scanner.evaluate_headers(
+        scanner._normalize_headers(headers.items()), target=URL, method="httpx"
+    )
+    assert not any("Imperva" in f.title or "Incapsula" in f.title for f in findings)
