@@ -250,6 +250,13 @@ HEADERS_CHECKS: list[dict] = [
      "severity": "LOW",
      "title": "Set-Cookie missing SameSite",
      "description": "Cookie sans SameSite — risque CSRF."},
+
+    # --- Group E: WAF/CDN signatures (informational) ---
+    {"header": "Set-Cookie", "rule": "must_not_match",
+     "pattern": r"ipmsperf_uuid", "severity": "INFO",
+     "title": "WAF/CDN detected (Imperva/Incapsula signature)",
+     "description": "Set-Cookie contient une signature Imperva/Incapsula (ipmsperf_uuid) — Sprint 3 phishing surface devra tenir compte du WAF.",
+     "flags": ["CONTEXT_DEPENDENT"]},
 ]
 
 app = typer.Typer(add_completion=False)
@@ -334,6 +341,23 @@ def _evaluate(check: dict, headers: dict[str, str]) -> Optional[tuple[str, str]]
     return raw, f"{name}: {raw}"
 
 
+def _apply_chain_dependency(findings: list[Finding]) -> None:
+    """Tag findings sharing the same evidence source with CHAIN_DEPENDENCY.
+
+    Two or more findings derived from the same raw header value (same
+    evidence[0] string) are downstream of one root cause. We mark them so
+    the AnalystAgent / report can deduplicate or group them.
+    """
+    from collections import Counter
+
+    counts = Counter(f.evidence[0] for f in findings if f.evidence)
+    for f in findings:
+        if not f.evidence:
+            continue
+        if counts[f.evidence[0]] >= 2 and "CHAIN_DEPENDENCY" not in f.flags:
+            f.flags.append("CHAIN_DEPENDENCY")
+
+
 def evaluate_headers(
     headers: dict[str, str], target: str, method: str
 ) -> list[Finding]:
@@ -356,16 +380,32 @@ def evaluate_headers(
                 evidence=[f"{evidence_label} (method={method})"],
                 analyst_conclusion=check["description"],
                 severity=check["severity"],
+                flags=list(check.get("flags", [])),
             )
         )
+    _apply_chain_dependency(findings)
     return findings
 
 
 def scan(target: str) -> list[Finding]:
-    """Full scan: scope check → fetch headers → evaluate."""
+    """HTTP-headers scan (mode=http). Scope check → fetch → evaluate."""
     assert_in_scope(target, sprint=1)
     headers, method = fetch_headers(target)
     return evaluate_headers(headers, target=target, method=method)
+
+
+def scan_tls(target: str) -> list[Finding]:
+    """TLS scan (mode=tls). Delegates to tools._tls.scan_tls."""
+    from tools import _tls
+
+    return _tls.scan_tls(target)
+
+
+def scan_dns(target: str) -> list[Finding]:
+    """DNS scan (mode=dns). Delegates to tools._dns.scan_dns."""
+    from tools import _dns
+
+    return _dns.scan_dns(target)
 
 
 def write_findings(findings: list[Finding], out_path: Path) -> None:
@@ -392,14 +432,25 @@ def print_summary(findings: list[Finding], tool: str) -> None:
 
 @app.command()
 def main(
-    target: str = typer.Option(..., "--target", help="Full URL (https://host)"),
+    target: str = typer.Option(..., "--target", help="URL (http mode) or hostname (tls/dns mode)"),
     output: Path = typer.Option(..., "--output", help="JSON output file"),
+    mode: str = typer.Option("http", "--mode", help="http | tls | dns"),
 ):
-    """Sprint 1 HTTP headers scanner."""
-    findings = scan(target)
+    """Scanner CLI — dispatches on --mode."""
+    if mode == "http":
+        findings = scan(target)
+        label = "scanner-http"
+    elif mode == "tls":
+        findings = scan_tls(target)
+        label = "scanner-tls"
+    elif mode == "dns":
+        findings = scan_dns(target)
+        label = "scanner-dns"
+    else:
+        raise typer.BadParameter(f"unknown mode: {mode!r} (expected http|tls|dns)")
     write_findings(findings, output)
-    typer.echo(f"[scanner] {len(findings)} finding(s) → {output}")
-    print_summary(findings, tool="scanner")
+    typer.echo(f"[{label}] {len(findings)} finding(s) → {output}")
+    print_summary(findings, tool=label)
 
 
 if __name__ == "__main__":
