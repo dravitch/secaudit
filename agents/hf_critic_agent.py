@@ -84,6 +84,7 @@ class HFCriticAgent(BaseAgent):
             base_url=HF_BASE_URL,
             api_key=token,
         )
+        self._total_usage = {"input_tokens": 0, "output_tokens": 0}
 
     # ── Public API ──────────────────────────────────────────────────────
 
@@ -120,6 +121,14 @@ class HFCriticAgent(BaseAgent):
             ],
         )
         text = response.choices[0].message.content or ""
+        usage = getattr(response, "usage", None)
+        if usage is not None:
+            self._total_usage["input_tokens"] += int(
+                getattr(usage, "prompt_tokens", 0) or 0
+            )
+            self._total_usage["output_tokens"] += int(
+                getattr(usage, "completion_tokens", 0) or 0
+            )
         return self._parse_findings(text)
 
     # ── Verdict merging ─────────────────────────────────────────────────

@@ -1,0 +1,534 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>SecAudit / Mini-Mythos — Dashboard</title>
+<style>
+  /* ── Oblivion palette ─────────────────────────────────────────── */
+  :root{
+    --bg-0:#0b0d10; --bg-1:#11151a; --bg-2:#171c22;
+    --border:#222a32; --border-hi:#2f3a45;
+    --text-0:#dde3ea; --text-1:#9aa6b1; --text-2:#5d6772;
+    --accent:#8be9fd; --accent-2:#bd93f9;
+    --crit:#ff5555; --high:#ff7b39; --med:#f1c40f;
+    --low:#7dc97a; --info:#5b8db8;
+    --confirmed:#7dc97a; --nuanced:#f1c40f; --rejected:#ff5555;
+    --mono:'JetBrains Mono','Fira Code',ui-monospace,monospace;
+    --sans:-apple-system,'Inter',system-ui,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;background:var(--bg-0);color:var(--text-0);
+            font-family:var(--sans);font-size:14px;line-height:1.5}
+  a{color:var(--accent);text-decoration:none}
+  button{font-family:inherit;font-size:13px;cursor:pointer;color:var(--text-0);
+         background:var(--bg-2);border:1px solid var(--border);padding:6px 10px;
+         border-radius:4px;transition:border-color .15s}
+  button:hover{border-color:var(--accent)}
+
+  /* ── Layout ───────────────────────────────────────────────────── */
+  .wrap{max-width:1280px;margin:0 auto;padding:24px}
+  header{display:flex;align-items:center;justify-content:space-between;
+         padding:14px 18px;background:var(--bg-1);border:1px solid var(--border);
+         border-radius:6px;margin-bottom:18px}
+  header h1{margin:0;font-size:16px;font-weight:600;letter-spacing:.5px}
+  header h1 .tag{color:var(--accent);font-family:var(--mono);font-size:13px;
+                 margin-left:8px}
+  .controls{display:flex;gap:8px;align-items:center}
+  .controls label{cursor:pointer}
+  .file-name{font-family:var(--mono);font-size:12px;color:var(--text-1);
+             margin-left:4px}
+
+  .grid{display:grid;grid-template-columns:1.1fr .9fr;gap:18px}
+  @media (max-width:980px){.grid{grid-template-columns:1fr}}
+
+  .card{background:var(--bg-1);border:1px solid var(--border);
+        border-radius:6px;padding:18px;margin-bottom:18px}
+  .card h2{margin:0 0 12px;font-size:13px;letter-spacing:1px;
+           color:var(--text-1);text-transform:uppercase;font-weight:500}
+
+  /* ── Stat tiles ───────────────────────────────────────────────── */
+  .tiles{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
+  .tile{background:var(--bg-2);border:1px solid var(--border);border-radius:5px;
+        padding:10px 12px}
+  .tile .num{font-size:22px;font-family:var(--mono);font-weight:600}
+  .tile .lbl{font-size:11px;color:var(--text-2);letter-spacing:.5px;
+             text-transform:uppercase}
+  .tile.crit{border-left:3px solid var(--crit)}
+  .tile.high{border-left:3px solid var(--high)}
+  .tile.med {border-left:3px solid var(--med)}
+  .tile.low {border-left:3px solid var(--low)}
+
+  /* ── Verdict bar ──────────────────────────────────────────────── */
+  .vbar{display:flex;height:14px;border-radius:3px;overflow:hidden;
+        background:var(--bg-2);margin:6px 0 4px}
+  .vbar > span{display:block}
+  .vbar .conf{background:var(--confirmed)}
+  .vbar .nuan{background:var(--nuanced)}
+  .vbar .rej {background:var(--rejected)}
+  .vlegend{display:flex;gap:14px;font-size:11px;color:var(--text-2)}
+  .vlegend i{display:inline-block;width:8px;height:8px;border-radius:50%;
+             margin-right:5px;vertical-align:1px}
+
+  /* ── Filters ──────────────────────────────────────────────────── */
+  .filters{display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap}
+  .filters button{font-size:12px;padding:4px 10px}
+  .filters button.active{border-color:var(--accent);color:var(--accent)}
+
+  /* ── Findings list ────────────────────────────────────────────── */
+  .finding{padding:10px 12px;border:1px solid var(--border);border-radius:5px;
+           background:var(--bg-2);margin-bottom:8px;cursor:pointer;
+           transition:border-color .12s}
+  .finding:hover{border-color:var(--border-hi)}
+  .finding header{padding:0;background:none;border:none;margin:0;
+                  display:flex;justify-content:space-between;align-items:flex-start;
+                  gap:10px}
+  .finding .ttl{font-weight:500;font-size:13.5px;color:var(--text-0)}
+  .finding .meta{font-size:11px;color:var(--text-2);margin-top:3px;
+                 font-family:var(--mono)}
+  .badges{display:flex;gap:5px;flex-shrink:0;flex-wrap:wrap}
+  .badge{font-size:10px;padding:2px 6px;border-radius:3px;font-family:var(--mono);
+         letter-spacing:.5px;text-transform:uppercase;white-space:nowrap}
+  .b-crit{background:rgba(255,85,85,.18); color:var(--crit)}
+  .b-high{background:rgba(255,123,57,.18);color:var(--high)}
+  .b-med {background:rgba(241,196,15,.18);color:var(--med)}
+  .b-low {background:rgba(125,201,122,.18);color:var(--low)}
+  .b-info{background:rgba(91,141,184,.18); color:var(--info)}
+  .b-confirmed{background:rgba(125,201,122,.15);color:var(--confirmed)}
+  .b-nuanced  {background:rgba(241,196,15,.15);color:var(--nuanced)}
+  .b-rejected {background:rgba(255,85,85,.15);color:var(--rejected)}
+  .b-pending  {background:rgba(155,165,175,.15);color:var(--text-1)}
+  .b-flag{background:rgba(189,147,249,.15);color:var(--accent-2)}
+  .b-trunc{background:rgba(255,123,57,.20);color:var(--high)}
+  .b-ctx {background:rgba(139,233,253,.15);color:var(--accent)}
+
+  .section-sep{margin:14px 0 10px;padding:6px 10px;background:var(--bg-2);
+               border-left:3px solid var(--accent);border-radius:3px;
+               font-size:11px;letter-spacing:1px;color:var(--text-1);
+               text-transform:uppercase}
+
+  /* ── Terminal ─────────────────────────────────────────────────── */
+  .term{background:#000;border:1px solid var(--border);border-radius:5px;
+        padding:12px;font-family:var(--mono);font-size:12px;height:280px;
+        overflow-y:auto;line-height:1.6}
+  .term .ln{color:var(--text-0);white-space:pre-wrap}
+  .term .ok{color:var(--low)}
+  .term .warn{color:var(--med)}
+  .term .err{color:var(--crit)}
+  .term .dim{color:var(--text-2)}
+
+  /* ── Statusbar ────────────────────────────────────────────────── */
+  .statusbar{display:flex;justify-content:space-between;font-size:11px;
+             color:var(--text-2);font-family:var(--mono);padding:8px 14px;
+             background:var(--bg-1);border:1px solid var(--border);
+             border-radius:6px;margin-top:18px}
+
+  /* ── Modal ────────────────────────────────────────────────────── */
+  .modal{position:fixed;inset:0;background:rgba(0,0,0,.7);display:none;
+         align-items:center;justify-content:center;z-index:50;padding:20px}
+  .modal.show{display:flex}
+  .modal .body{background:var(--bg-1);border:1px solid var(--border-hi);
+               border-radius:6px;max-width:760px;width:100%;max-height:85vh;
+               overflow-y:auto;padding:20px}
+  .modal h3{margin:0 0 8px}
+  .modal pre{background:#000;border:1px solid var(--border);border-radius:4px;
+             padding:10px;font-size:11px;white-space:pre-wrap;
+             font-family:var(--mono);color:var(--text-0);overflow-x:auto}
+  .modal .close{float:right;font-size:13px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>SECAUDIT <span class="tag">// mini-mythos</span></h1>
+  <div class="controls">
+    <button onclick="document.getElementById('jsonFile').click()">Charger JSON</button>
+    <input id="jsonFile" type="file" accept=".json" style="display:none"
+           onchange="loadFromFile(event)" />
+    <span id="loadedName" class="file-name">demo data</span>
+    <button onclick="exportJSON()">Exporter JSON</button>
+    <button onclick="copyMarkdown()">Copier rapport MD</button>
+  </div>
+</header>
+
+<div class="grid">
+
+  <!-- LEFT COLUMN: stats + findings -->
+  <div>
+    <div class="card">
+      <h2>Vue d'ensemble</h2>
+      <div class="tiles">
+        <div class="tile crit"><div class="num" id="cCrit">0</div><div class="lbl">critical</div></div>
+        <div class="tile high"><div class="num" id="cHigh">0</div><div class="lbl">high</div></div>
+        <div class="tile med"><div class="num" id="cMed">0</div><div class="lbl">medium</div></div>
+        <div class="tile low"><div class="num" id="cLow">0</div><div class="lbl">low / info</div></div>
+      </div>
+      <div style="margin-top:14px">
+        <div style="font-size:11px;color:var(--text-2);margin-bottom:4px;
+                    font-family:var(--mono)">VERDICT CRITIC</div>
+        <div class="vbar" id="vbar"></div>
+        <div class="vlegend">
+          <span><i style="background:var(--confirmed)"></i><span id="lConf">0</span> confirmed</span>
+          <span><i style="background:var(--nuanced)"></i><span id="lNuan">0</span> nuanced</span>
+          <span><i style="background:var(--rejected)"></i><span id="lRej">0</span> rejected</span>
+        </div>
+        <div style="margin-top:10px;font-size:11px;color:var(--text-2);
+                    font-family:var(--mono)">
+          DÉSACCORD CRITIC: <span id="disagreement">0%</span>
+          (NUANCED + REJECTED / total)
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Findings</h2>
+      <div class="filters">
+        <button class="active" data-filter="all">Tous</button>
+        <button data-filter="confirmed">Confirmed</button>
+        <button data-filter="nuanced">Nuanced</button>
+        <button data-filter="critical">Critical</button>
+      </div>
+      <div id="findingsList"></div>
+    </div>
+  </div>
+
+  <!-- RIGHT COLUMN: agents + terminal -->
+  <div>
+    <div class="card">
+      <h2>Agents IA</h2>
+      <div style="font-size:12px;line-height:1.8">
+        <div><b>AnalystAgent</b> · <span class="file-name">claude-sonnet-4-5</span>
+             <span style="color:var(--text-2)">(Anthropic)</span></div>
+        <div><b>CriticAgent</b> · <span class="file-name">deepseek-ai/DeepSeek-V4-Pro</span>
+             <span style="color:var(--text-2)">via HF Router · temp=0</span></div>
+        <div style="color:var(--text-2);margin-top:6px;font-size:11px">
+          Architecture multi-fournisseurs : éviter la chambre d'écho en
+          confrontant Anthropic à un modèle entraîné indépendamment.
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Pipeline (S0 → S5)</h2>
+      <div class="term" id="term"></div>
+    </div>
+  </div>
+</div>
+
+<div class="statusbar">
+  <span>SecAudit v0.1 · Oblivion theme</span>
+  <span id="statusRight">no data loaded · click "Charger JSON"</span>
+</div>
+
+</div><!-- /wrap -->
+
+<!-- ── Detail modal ───────────────────────────────────────────────── -->
+<div class="modal" id="modal" onclick="if(event.target===this)closeModal()">
+  <div class="body">
+    <button class="close" onclick="closeModal()">close</button>
+    <h3 id="mTitle"></h3>
+    <div id="mMeta" style="font-size:12px;color:var(--text-2);margin-bottom:10px;
+                            font-family:var(--mono)"></div>
+    <div id="mBody" style="font-size:13px;line-height:1.6"></div>
+    <h4 style="margin-top:14px;font-size:11px;letter-spacing:1px;color:var(--text-1);
+               text-transform:uppercase">Evidence</h4>
+    <pre id="mEvidence"></pre>
+  </div>
+</div>
+
+<script>
+/* ── Demo data (used until user loads JSON) ─────────────────────── */
+const DEMO = [
+  {id:"d1",sprint:2,tool:"scanner-dns",target:"telemo.gov.gn",
+   timestamp:"2026-05-03",
+   title:"DNSSEC missing (no DNSKEY)",
+   finding:"Aucun DNSKEY publié — DNSSEC non activé.",
+   evidence:["dig +short DNSKEY telemo.gov.gn → empty"],
+   analyst_conclusion:"Sans DNSSEC, spoofing DNS facilité.",
+   severity:"CRITICAL",critic_verdict:"CONFIRMED",
+   critic_rationale:"Aucun DNSKEY — vérifié indépendamment par dig.",
+   confidence_score:0.88,flags:[]},
+  {id:"d2",sprint:2,tool:"scanner-dns",target:"telemo.gov.gn",
+   timestamp:"2026-05-03",
+   title:"DMARC policy is p=none",
+   finding:"Politique DMARC publiée mais 'none' — aucun blocage.",
+   evidence:['"v=DMARC1; p=none; rua=mailto:reports@example.com"'],
+   analyst_conclusion:"Politique p=none = observation seulement.",
+   severity:"HIGH",critic_verdict:"CONFIRMED",
+   critic_rationale:"Confirmé par dig +short TXT _dmarc.telemo.gov.gn.",
+   confidence_score:0.90,flags:[]},
+  {id:"d3",sprint:1,tool:"scanner",target:"https://telemo.gov.gn",
+   timestamp:"2026-05-03",
+   title:"X-Frame-Options missing",
+   finding:"X-Frame-Options absent — clickjacking si CSP frame-ancestors absent.",
+   evidence:["X-Frame-Options: header absent (method=httpx)"],
+   analyst_conclusion:"Header manquant — utilité dépend du contexte.",
+   severity:"MEDIUM",critic_verdict:"NUANCED",
+   critic_rationale:"WAF Imperva présent — peut filtrer en amont.",
+   confidence_score:0.60,flags:["CONTEXT_DEPENDENT"]},
+  {id:"d4",sprint:3,tool:"phishing-surface",target:"https://telemo.gov.gn",
+   timestamp:"2026-05-03",
+   title:"Favicon absent",
+   finding:"Aucun favicon accessible.",
+   evidence:["/favicon.ico → not 200","/favicon.png → not 200"],
+   analyst_conclusion:"Favicon possiblement bloqué par WAF Imperva.",
+   severity:"INFO",critic_verdict:"NUANCED",
+   critic_rationale:"WAF Imperva présent — absence non confirmée.",
+   confidence_score:0.55,flags:["CONTEXT_DEPENDENT"]},
+  {id:"d5",sprint:4,tool:"phishing-surface",target:"telemo.gov.gn",
+   timestamp:"2026-05-03",
+   title:"14 typosquat variants identified — phishing delivery surface",
+   finding:"14 variantes typosquat ont été générées pour telemo.gov.gn.",
+   evidence:["variants=['te1emo.gov.gn','telem0.gov.gn','telemo.gouv.gn',...]"],
+   analyst_conclusion:"SPF valide. Risque réel = DMARC p=none + DNSSEC absent.",
+   severity:"CRITICAL",critic_verdict:"NUANCED",
+   critic_rationale:"Synthèse correcte mais variants à valider via DNS lookup.",
+   confidence_score:0.65,flags:["PHISHING_VECTOR","CHAIN_DEPENDENCY"]},
+];
+
+let DATA = DEMO.slice();
+let FILTER = "all";
+
+/* ── Rendering ──────────────────────────────────────────────────── */
+function bySeverity(arr){
+  const out = {CRITICAL:0, HIGH:0, MEDIUM:0, LOW:0, INFO:0};
+  arr.forEach(f => out[f.severity] = (out[f.severity]||0) + 1);
+  return out;
+}
+function byVerdict(arr){
+  const out = {CONFIRMED:0, NUANCED:0, REJECTED:0, PENDING:0};
+  arr.forEach(f => out[f.critic_verdict] = (out[f.critic_verdict]||0) + 1);
+  return out;
+}
+function isTruncated(f){
+  return (f.evidence||[]).some(e =>
+    String(e).includes("finish_reason=length") || String(e).includes("TRUNCATED")
+  );
+}
+
+function render(){
+  const sev = bySeverity(DATA);
+  document.getElementById("cCrit").textContent = sev.CRITICAL;
+  document.getElementById("cHigh").textContent = sev.HIGH;
+  document.getElementById("cMed").textContent  = sev.MEDIUM;
+  document.getElementById("cLow").textContent  = sev.LOW + sev.INFO;
+
+  const v = byVerdict(DATA);
+  const total = Math.max(1, v.CONFIRMED + v.NUANCED + v.REJECTED);
+  const bar = document.getElementById("vbar");
+  bar.innerHTML =
+    `<span class="conf" style="width:${v.CONFIRMED/total*100}%"></span>` +
+    `<span class="nuan" style="width:${v.NUANCED/total*100}%"></span>` +
+    `<span class="rej"  style="width:${v.REJECTED/total*100}%"></span>`;
+  document.getElementById("lConf").textContent = v.CONFIRMED;
+  document.getElementById("lNuan").textContent = v.NUANCED;
+  document.getElementById("lRej").textContent  = v.REJECTED;
+
+  const disagreement = (v.NUANCED + v.REJECTED) / Math.max(1, DATA.length) * 100;
+  document.getElementById("disagreement").textContent = disagreement.toFixed(0) + "%";
+
+  renderFindings();
+  document.getElementById("statusRight").textContent =
+    `${DATA.length} findings · loaded ${new Date().toLocaleTimeString()}`;
+}
+
+function renderFindings(){
+  const list = document.getElementById("findingsList");
+  list.innerHTML = "";
+
+  let filtered = DATA;
+  if (FILTER === "confirmed") filtered = DATA.filter(f => f.critic_verdict === "CONFIRMED");
+  else if (FILTER === "nuanced")  filtered = DATA.filter(f => f.critic_verdict === "NUANCED");
+  else if (FILTER === "critical") filtered = DATA.filter(f => f.severity === "CRITICAL");
+
+  // Show CONFIRMED first, then a separator, then NUANCED — only when "all" filter.
+  const order = (FILTER === "all")
+    ? [
+        ...filtered.filter(f => f.critic_verdict === "CONFIRMED"),
+        "__SEP_INVESTIGATE__",
+        ...filtered.filter(f => f.critic_verdict === "NUANCED"),
+        ...filtered.filter(f => f.critic_verdict === "REJECTED"),
+        ...filtered.filter(f => f.critic_verdict === "PENDING"),
+      ]
+    : filtered;
+
+  let injected = false;
+  order.forEach(f => {
+    if (f === "__SEP_INVESTIGATE__"){
+      const nuanced = filtered.filter(x => x.critic_verdict === "NUANCED").length;
+      if (nuanced === 0) return;
+      const sep = document.createElement("div");
+      sep.className = "section-sep";
+      sep.textContent = `À investiguer · ${nuanced} finding(s)`;
+      list.appendChild(sep);
+      injected = true;
+      return;
+    }
+    list.appendChild(buildFindingCard(f));
+  });
+
+  if (filtered.length === 0){
+    list.innerHTML = `<div style="color:var(--text-2);padding:14px;text-align:center;
+      font-family:var(--mono);font-size:12px">no findings match filter "${FILTER}"</div>`;
+  }
+}
+
+function buildFindingCard(f){
+  const div = document.createElement("div");
+  div.className = "finding";
+  div.onclick = () => openModal(f);
+
+  const sevClass  = "b-" + f.severity.toLowerCase().slice(0,4);
+  const vClass    = "b-" + f.critic_verdict.toLowerCase();
+  const flagsHtml = (f.flags||[]).map(fl =>
+    `<span class="badge ${fl==='CONTEXT_DEPENDENT'?'b-ctx':'b-flag'}">${fl}</span>`
+  ).join("");
+  const truncHtml = isTruncated(f)
+    ? `<span class="badge b-trunc">⚑ tronqué</span>` : "";
+
+  div.innerHTML = `
+    <header>
+      <div>
+        <div class="ttl">${escapeHtml(f.title)}</div>
+        <div class="meta">S${f.sprint} · ${f.tool} · ${escapeHtml(f.target)}
+          · conf ${(f.confidence_score*100).toFixed(0)}%</div>
+      </div>
+      <div class="badges">
+        <span class="badge ${sevClass}">${f.severity}</span>
+        <span class="badge ${vClass}">${f.critic_verdict}</span>
+        ${truncHtml}${flagsHtml}
+      </div>
+    </header>`;
+  return div;
+}
+
+function escapeHtml(s){
+  return String(s).replace(/[&<>"']/g, c =>
+    ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+
+/* ── Modal ──────────────────────────────────────────────────────── */
+function openModal(f){
+  document.getElementById("mTitle").textContent = f.title;
+  document.getElementById("mMeta").textContent =
+    `S${f.sprint} · ${f.tool} · ${f.target} · ${f.severity} · ` +
+    `${f.critic_verdict} (${(f.confidence_score*100).toFixed(0)}% confidence)` +
+    (isTruncated(f) ? " · ⚑ réponse tronquée" : "");
+  document.getElementById("mBody").innerHTML =
+    `<p><b>Finding :</b> ${escapeHtml(f.finding)}</p>` +
+    `<p><b>Analyse :</b> ${escapeHtml(f.analyst_conclusion||"—")}</p>` +
+    `<p><b>Critic :</b> ${escapeHtml(f.critic_rationale||"—")}</p>`;
+  document.getElementById("mEvidence").textContent =
+    (f.evidence||[]).join("\n");
+  document.getElementById("modal").classList.add("show");
+}
+function closeModal(){
+  document.getElementById("modal").classList.remove("show");
+}
+
+/* ── File loading ───────────────────────────────────────────────── */
+function loadFromFile(ev){
+  const file = ev.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = e => {
+    try {
+      const parsed = JSON.parse(e.target.result);
+      if (!Array.isArray(parsed)){
+        alert("JSON doit être un tableau de findings");
+        return;
+      }
+      DATA = parsed;
+      document.getElementById("loadedName").textContent = file.name;
+      logTerm(`[load] ${file.name} → ${DATA.length} findings`, "ok");
+      render();
+    } catch(err){
+      alert("JSON invalide : " + err.message);
+    }
+  };
+  reader.readAsText(file);
+}
+
+function exportJSON(){
+  const blob = new Blob([JSON.stringify(DATA, null, 2)],
+                       {type:"application/json"});
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement("a");
+  a.href = url;
+  a.download = `secaudit_findings_${Date.now()}.json`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function copyMarkdown(){
+  const v = byVerdict(DATA);
+  const sev = bySeverity(DATA);
+  let md = `# SecAudit — ${DATA.length} findings\n\n`;
+  md += `Sévérités : ${Object.entries(sev).filter(([,n])=>n>0).map(([k,n])=>`${k}=${n}`).join(", ")}\n`;
+  md += `Verdicts  : ${Object.entries(v).filter(([,n])=>n>0).map(([k,n])=>`${k}=${n}`).join(", ")}\n\n`;
+  DATA.forEach(f => {
+    md += `## ${f.title} (${f.severity}, ${f.critic_verdict})\n`;
+    md += `- Sprint S${f.sprint} · ${f.tool} · ${f.target}\n`;
+    md += `- Confidence : ${(f.confidence_score*100).toFixed(0)}%\n`;
+    md += `- ${f.analyst_conclusion}\n\n`;
+  });
+  navigator.clipboard.writeText(md).then(
+    () => logTerm("[copy] Markdown copied to clipboard", "ok"),
+    () => logTerm("[copy] failed (clipboard API blocked?)", "err")
+  );
+}
+
+/* ── Filters ────────────────────────────────────────────────────── */
+document.querySelectorAll(".filters button").forEach(b => {
+  b.onclick = () => {
+    document.querySelectorAll(".filters button").forEach(x => x.classList.remove("active"));
+    b.classList.add("active");
+    FILTER = b.dataset.filter;
+    renderFindings();
+  };
+});
+
+/* ── Terminal animation (S0 → S5) ───────────────────────────────── */
+function logTerm(text, cls){
+  const t = document.getElementById("term");
+  const ln = document.createElement("div");
+  ln.className = "ln " + (cls || "");
+  ln.textContent = text;
+  t.appendChild(ln);
+  t.scrollTop = t.scrollHeight;
+}
+function bootSequence(){
+  const lines = [
+    ["[S0] scope check ........... telemo.gov.gn ✓", "ok"],
+    ["[S1] nmap ports 80/443 .... 2 findings", "dim"],
+    ["[S1] HTTP headers (60+) ... 14 findings", "dim"],
+    ["[S2] testssl.sh .......... 1 finding (TLS1.2)", "dim"],
+    ["[S2] dig DNSSEC/SPF/DMARC . 4 findings", "dim"],
+    ["[S3] login form parser ... 1 finding", "dim"],
+    ["[S3] SRI checker ......... 0 findings (no external assets)", "dim"],
+    ["[S4] typosquat generator . 14+1 findings", "dim"],
+    ["[S5] AnalystAgent ........ enriching ...", "warn"],
+    ["[S5] AnalystAgent ........ 38 → 35 (3 suppressed by ground truth)", "ok"],
+    ["[S5] CriticAgent ......... judging ...", "warn"],
+    ["[S5] CriticAgent ......... CONFIRMED=19 NUANCED=16 REJECTED=0", "ok"],
+    ["[S5] disagreement rate ... 46%", "ok"],
+    ["[REPORT] → results/report_telemo.gov.gn_20260503.md", "ok"],
+    ["[done] click 'Charger JSON' to import live findings", "dim"],
+  ];
+  let i = 0;
+  const tick = () => {
+    if (i >= lines.length) return;
+    logTerm(lines[i][0], lines[i][1]);
+    i++;
+    setTimeout(tick, 220);
+  };
+  tick();
+}
+
+/* ── Boot ───────────────────────────────────────────────────────── */
+render();
+bootSequence();
+</script>
+</body>
+</html>

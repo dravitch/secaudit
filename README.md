@@ -49,17 +49,43 @@ cd secaudit
 nix-shell                       # ou : nix develop (flake)
 cp .env.example .env && nano .env
 python3 -m pytest tests/
-python main.py --target telemo.gov.gn
 ```
 
 Le `shellHook` crée automatiquement le venv Python (`.venv`) via `uv` et
 installe `requirements.txt`.
 
+## Avant de lancer
+
+```bash
+# Vérifier que les deux clés API répondent (Anthropic + HF Router → DeepSeek).
+python test_api_keys.py
+# variantes :
+python test_api_keys.py --anthropic-only
+python test_api_keys.py --hf-only
+```
+
+`test_api_keys.py` n'est pas dans la suite pytest — c'est un check
+d'environnement. À lancer après chaque rotation de clé ou changement de plan.
+
+## Lancer le pipeline
+
+```bash
+# Pipeline complet S1 → S5 (avec IA)
+python main.py --target telemo.gov.gn --sprints 1,2,3,4,5
+
+# Pipeline sans IA (vérification hebdo, zéro coût)
+python main.py --target telemo.gov.gn --sprints 1,2,3 --no-ai
+
+# Dashboard local — charger results/s5_critic_*.json via le bouton "Charger JSON"
+python -m http.server 8080 --directory ui/
+# → http://localhost:8080/dashboard.html
+```
+
 ## Statut actuel
 
-- **Session 1 (Fondation) — fait** : arborescence, env Nix, schéma `Finding`
-  validé par `pytest tests/test_schema.py` (9/9).
-- Sessions 2 → 6 : voir la roadmap dans `CLAUDE.md` §9.
+- **Sessions 1 → 6 — faites** : pipeline complet, agents multi-fournisseurs
+  (Anthropic + HF/DeepSeek), reporter Markdown, dashboard Oblivion.
+- Voir la roadmap complète dans `CLAUDE.md` §9.
 
 ## Sécurité (non négociable)
 
