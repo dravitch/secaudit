@@ -174,6 +174,56 @@ def test_strict_transport_security_label_recognised():
     assert hsts[0].severity == "HIGH"
 
 
+# ── Session 4 §0 corrections ──────────────────────────────────────────
+
+
+# Excerpt mirroring `testssl telemo.gov.gn` raw output (ANSI codes preserved).
+# Reproduces both leading-bold-escape on the cert+HSTS lines AND the
+# "Grade capped ..." synthesis line. Parser must:
+#   - strip ANSI before matching
+#   - emit ONE cert finding (29 days → MEDIUM)
+#   - emit ONE HSTS finding (deduped across both mentions) → HIGH
+TESTSSL_RAW_ANSI = (
+    "\x1b[1m subjectAltName (SAN)         \x1b[m\x1b[3mtelemo.gov.gn \x1b[m\n"
+    "\x1b[1m Trust (hostname)             \x1b[m\x1b[0;32mOk via CN wildcard\x1b[m\n"
+    "\x1b[1m Certificate Validity (UTC)   \x1b[m\x1b[0;31mexpires < 30 days (29)\x1b[m"
+    " (2026-05-03 09:12 --> 2026-06-02 09:12)\n"
+    "\x1b[1m Strict Transport Security    \x1b[m\x1b[1;33mnot offered\x1b[m\n"
+    "                              \x1b[0;33mGrade capped to A. HSTS is not offered\x1b[m\n"
+)
+
+
+def test_ansi_wrapped_lines_still_detected():
+    """Raw ANSI-coloured testssl output (no --color 0) must yield the same
+    findings as the stripped form."""
+    findings = _tls.parse_testssl_text(TESTSSL_RAW_ANSI, target=TARGET)
+    titles = [f.title for f in findings]
+    assert "Certificate expires in <30 days" in titles, (
+        f"cert finding lost when ANSI present; got: {titles}"
+    )
+    assert "HSTS not advertised at TLS layer" in titles, (
+        f"HSTS finding lost when ANSI present; got: {titles}"
+    )
+
+
+def test_hsts_dedupes_grade_capped_synthesis_line():
+    """`Grade capped to A. HSTS is not offered` must NOT add a second HSTS
+    finding when the explicit 'Strict Transport Security not offered' line
+    already produced one."""
+    findings = _tls.parse_testssl_text(TESTSSL_RAW_ANSI, target=TARGET)
+    hsts = [f for f in findings if "HSTS" in f.title]
+    assert len(hsts) == 1, (
+        f"expected 1 HSTS finding (deduped), got {len(hsts)}: "
+        + ", ".join(f.title + ' / ' + f.evidence[0] for f in hsts)
+    )
+
+
+def test_strip_ansi_helper():
+    """Sanity check on the ANSI scrubber."""
+    assert _tls._strip_ansi("\x1b[1m foo \x1b[m\x1b[0;31mbar\x1b[m") == " foo bar"
+    assert _tls._strip_ansi("plain text") == "plain text"
+
+
 # ── End-to-end via mocked subprocess ────────────────────────────────────
 
 

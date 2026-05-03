@@ -84,8 +84,23 @@ def _parse_cert_days_remaining(line: str) -> int | None:
 
 
 CERT_LINE_RE = re.compile(
-    r"^\s*(?:Certificate Validity|Cert\.?\s*expiration)", re.IGNORECASE
+    r"(?:Certificate Validity|Cert\.?\s*expiration)", re.IGNORECASE
 )
+
+# Strip ANSI SGR escape sequences so detection doesn't depend on whether
+# testssl was invoked with --color 0 (NixOS shells / piped runs may leak codes).
+ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
+def _strip_ansi(line: str) -> str:
+    return ANSI_ESCAPE_RE.sub("", line)
+
+
+# HSTS line shapes (after ANSI strip + lstrip):
+#   "Strict Transport Security    not offered"
+#   "HSTS                          offered, max-age=..., preload"
+#   "Grade capped to A. HSTS is not offered"   (synthesis line, dedupe target)
+HSTS_LINE_RE = re.compile(r"\b(?:HSTS|Strict[- ]Transport[- ]Security)\b", re.IGNORECASE)
 
 
 def _make_tls_finding(
@@ -157,14 +172,23 @@ def run_testssl(target: str, timeout: int = TESTSSL_TIMEOUT_SEC) -> str:
 
 
 def parse_testssl_text(text: str, target: str) -> list[Finding]:
-    """Parse testssl.sh text output into Findings. One Finding per anomalous line."""
+    """Parse testssl.sh text output into Findings. One Finding per anomalous line.
+
+    ANSI escape codes (SGR) are stripped before matching so the parser works
+    whether testssl was invoked with --color 0 or with default colorisation
+    (e.g. when redirected to a file from a fully-coloured shell). HSTS is
+    deduped because testssl emits both a 'Strict Transport Security' line
+    and a final 'Grade capped ... HSTS is not offered' synthesis line.
+    """
     findings: list[Finding] = []
+    seen_hsts_kind: set[str] = set()
+
     for raw_line in text.splitlines():
-        line = raw_line.rstrip()
+        line = _strip_ansi(raw_line).rstrip()
         if not line.strip():
             continue
 
-        # Pattern-based protocol / FS checks.
+        # Protocol / FS pattern checks.
         for pattern, severity, title, description in TLS_PATTERNS:
             if re.search(pattern, line, re.IGNORECASE):
                 findings.append(
@@ -188,22 +212,29 @@ def parse_testssl_text(text: str, target: str) -> list[Finding]:
                         f"Le certificat expire dans {days} jours — planifier le renouvellement.",
                     ))
 
-        # HSTS — testssl prints either "HSTS ..." or "Strict Transport Security ...".
-        stripped = line.lstrip()
-        if stripped.startswith("HSTS") or stripped.startswith("Strict Transport Security"):
+        # HSTS detection (deduped — testssl prints both an HTTP-headers line
+        # and a Grade-capped synthesis line). Note: "offered" is a substring
+        # of "not offered", so classify the missing case FIRST.
+        if HSTS_LINE_RE.search(line):
             lower = line.lower()
-            if "not offered" in lower or "no hsts" in lower:
+            is_missing = ("not offered" in lower) or ("no hsts" in lower)
+            is_offered_no_preload = (
+                ("offered" in lower) and (not is_missing) and ("preload" not in lower)
+            )
+            if is_missing and "missing" not in seen_hsts_kind:
                 findings.append(_make_tls_finding(
                     target, line, "HIGH",
                     "HSTS not advertised at TLS layer",
                     "testssl.sh signale HSTS absent — durcir le serveur.",
                 ))
-            elif "offered" in lower and "preload" not in lower:
+                seen_hsts_kind.add("missing")
+            elif is_offered_no_preload and "no_preload" not in seen_hsts_kind:
                 findings.append(_make_tls_finding(
                     target, line, "LOW",
                     "HSTS without preload",
                     "HSTS sans directive preload — non éligible à la liste Chromium preload.",
                 ))
+                seen_hsts_kind.add("no_preload")
 
     return findings
 
