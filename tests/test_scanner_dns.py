@@ -20,14 +20,18 @@ def _fake_dig(stdout: str, returncode: int = 0):
     )
 
 
-def _patch_dig(monkeypatch, mapping: dict):
-    """Patch tools._dns._dig to look up canned responses by (rrtype, name)."""
+def _patch_dig(monkeypatch, mapping: dict, reverse_mapping: dict | None = None):
+    """Patch tools._dns._dig and _dig_reverse with canned responses."""
     monkeypatch.setattr(_dns, "_resolve_dig", lambda: "/usr/bin/dig")
 
     def fake_dig(rrtype: str, name: str, timeout: int = _dns.DIG_TIMEOUT_SEC):
         return mapping.get((rrtype, name), [])
 
+    def fake_dig_reverse(ip: str, timeout: int = _dns.DIG_TIMEOUT_SEC):
+        return (reverse_mapping or {}).get(ip, [])
+
     monkeypatch.setattr(_dns, "_dig", fake_dig)
+    monkeypatch.setattr(_dns, "_dig_reverse", fake_dig_reverse)
 
 
 # ── DNSSEC ────────────────────────────────────────────────────────────
@@ -135,6 +139,52 @@ def test_mx_present_yields_info_with_chain_dependency(monkeypatch):
     assert f.severity == "INFO"
     assert "CHAIN_DEPENDENCY" in f.flags
     assert any("mail1" in e for e in f.evidence)
+
+
+# ── rDNS ──────────────────────────────────────────────────────────────
+
+
+def test_rdns_mismatch_yields_info(monkeypatch):
+    """A → 95.111.253.212 → PTR vmi3228287.contaboserver.net → INFO mismatch."""
+    _patch_dig(
+        monkeypatch,
+        mapping={("A", TARGET): ["95.111.253.212"]},
+        reverse_mapping={"95.111.253.212": ["vmi3228287.contaboserver.net."]},
+    )
+    findings = _dns.check_rdns(TARGET)
+    assert len(findings) == 1
+    f = findings[0]
+    assert f.severity == "INFO"
+    assert "rDNS mismatch" in f.title
+    assert "vmi3228287.contaboserver.net" in f.title
+    assert any("vmi3228287" in e for e in f.evidence)
+
+
+def test_rdns_aligned_yields_no_finding(monkeypatch):
+    """PTR contains the original host → no mismatch finding."""
+    _patch_dig(
+        monkeypatch,
+        mapping={("A", TARGET): ["95.111.253.212"]},
+        reverse_mapping={"95.111.253.212": [f"www.{TARGET}."]},
+    )
+    assert _dns.check_rdns(TARGET) == []
+
+
+def test_rdns_no_a_record_yields_no_finding(monkeypatch):
+    _patch_dig(monkeypatch, mapping={("A", TARGET): []})
+    assert _dns.check_rdns(TARGET) == []
+
+
+def test_rdns_no_ptr_yields_info_missing(monkeypatch):
+    """A resolved but no PTR → 'rDNS missing' INFO."""
+    _patch_dig(
+        monkeypatch,
+        mapping={("A", TARGET): ["95.111.253.212"]},
+        reverse_mapping={"95.111.253.212": []},
+    )
+    findings = _dns.check_rdns(TARGET)
+    assert len(findings) == 1
+    assert findings[0].title == "rDNS missing"
 
 
 # ── Full scan_dns + scope ─────────────────────────────────────────────

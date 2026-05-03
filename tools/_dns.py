@@ -51,6 +51,18 @@ def _dig(rrtype: str, name: str, timeout: int = DIG_TIMEOUT_SEC) -> list[str]:
     return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
 
 
+def _dig_reverse(ip: str, timeout: int = DIG_TIMEOUT_SEC) -> list[str]:
+    """Run `dig +short -x <ip>` for a reverse PTR lookup."""
+    binary = _resolve_dig()
+    cmd = [binary, "+short", "-x", ip]
+    proc = subprocess.run(
+        cmd, capture_output=True, text=True, check=False, timeout=timeout
+    )
+    if proc.returncode != 0 and not proc.stdout:
+        return []
+    return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+
+
 def _make_dns_finding(
     target: str,
     title: str,
@@ -146,6 +158,40 @@ def check_dkim(host: str, selector: str = DKIM_DEFAULT_SELECTOR) -> list[Finding
     return []
 
 
+def check_rdns(host: str) -> list[Finding]:
+    """Resolve A → reverse PTR. Emit INFO if PTR doesn't reference the host.
+
+    Useful signal for hosting attribution (e.g. Contabo VPS hosting a .gov.*
+    site). Pure passive query.
+    """
+    ips = _dig("A", host)
+    if not ips:
+        return []
+    findings: list[Finding] = []
+    for ip in ips[:1]:  # cap at the first A record to keep noise low
+        ptrs = _dig_reverse(ip)
+        if not ptrs:
+            findings.append(_make_dns_finding(
+                host,
+                "rDNS missing",
+                f"Aucun PTR pour {ip} — pas de signal d'attribution d'hébergement.",
+                "INFO",
+                [f"dig +short -x {ip} → empty"],
+            ))
+            continue
+        ptr = ptrs[0].rstrip(".")
+        # Hostname mismatch: PTR doesn't contain the original host name.
+        if host.lower() not in ptr.lower():
+            findings.append(_make_dns_finding(
+                host,
+                f"rDNS mismatch: {ptr}",
+                f"PTR de {ip} = {ptr} (hébergeur tiers, non aligné avec {host}).",
+                "INFO",
+                [f"dig +short A {host} → {ip}", f"dig +short -x {ip} → {ptr}"],
+            ))
+    return findings
+
+
 def check_mx(host: str) -> list[Finding]:
     """MX present → INFO + CHAIN_DEPENDENCY (phishing vector context)."""
     mx_records = _dig("MX", host)
@@ -162,7 +208,10 @@ def check_mx(host: str) -> list[Finding]:
 
 
 def scan_dns(target: str) -> list[Finding]:
-    """Full DNS scan: scope check → all checks. Order: DNSSEC, SPF, DMARC, DKIM, MX."""
+    """Full DNS scan: scope check → all checks.
+
+    Order: DNSSEC, SPF, DMARC, DKIM, MX, rDNS.
+    """
     assert_in_scope(target, sprint=2)
     host = normalize_host(target)
     findings: list[Finding] = []
@@ -171,4 +220,5 @@ def scan_dns(target: str) -> list[Finding]:
     findings.extend(check_dmarc(host))
     findings.extend(check_dkim(host))
     findings.extend(check_mx(host))
+    findings.extend(check_rdns(host))
     return findings
