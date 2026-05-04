@@ -103,6 +103,16 @@ class DeepSeekCriticAgent(BaseAgent):
     # ── LLM call ────────────────────────────────────────────────────────
 
     def _call_critic(self, batch: list[Finding]) -> list[Finding]:
+        """Call DeepSeek native API and extract verdict-only Finding stubs.
+
+        DeepSeek returns ONLY the verdict fields per the prompt
+        ({id, critic_verdict, critic_rationale, confidence_score, flags}),
+        so we cannot use Finding(**item) — Pydantic would reject it for
+        missing required fields (sprint, tool, target, title, finding,
+        severity). We use Finding.model_construct() to build verdict stubs
+        that bypass validation; _merge_verdicts then copies the verdict
+        fields onto the original (fully validated) input findings.
+        """
         user_payload = json.dumps(
             [json.loads(f.model_dump_json()) for f in batch],
             ensure_ascii=False,
@@ -142,7 +152,54 @@ class DeepSeekCriticAgent(BaseAgent):
                 stacklevel=2,
             )
         self._last_finish_reason = finish_reason
-        return self._parse_findings(text)
+
+        return self._parse_verdict_stubs(text)
+
+    def _parse_verdict_stubs(self, text: str) -> list[Finding]:
+        """Parse a verdict-only JSON payload into Finding stubs.
+
+        Accepts either {"findings": [...]} or a bare list. Each item must
+        carry at least an `id` — items missing the id are dropped. Truncated
+        arrays are recovered by BaseAgent._recover_truncated_json so that a
+        partially-streamed batch still updates the verdicts that did arrive.
+        """
+        cleaned = self._strip_code_fence(text)
+        if not cleaned.strip():
+            raise ValueError(
+                "DeepSeekCriticAgent: empty content (likely max_tokens=0 or upstream filter)"
+            )
+        try:
+            data = json.loads(cleaned)
+        except json.JSONDecodeError as exc:
+            recovered = self._recover_truncated_json(cleaned)
+            if recovered is None:
+                raise ValueError(
+                    f"DeepSeekCriticAgent: réponse JSON invalide "
+                    f"({exc.msg} at pos {exc.pos}). Texte brut : {cleaned[:200]!r}"
+                ) from exc
+            data = recovered
+
+        if isinstance(data, dict):
+            data = data.get("findings", [data])
+
+        verdicts: list[Finding] = []
+        for item in data:
+            if not isinstance(item, dict) or "id" not in item:
+                continue
+            try:
+                score = float(item.get("confidence_score", 0.0))
+            except (TypeError, ValueError):
+                score = 0.0
+            verdicts.append(
+                Finding.model_construct(
+                    id=item["id"],
+                    critic_verdict=item.get("critic_verdict", "PENDING"),
+                    critic_rationale=item.get("critic_rationale", ""),
+                    confidence_score=score,
+                    flags=list(item.get("flags") or []),
+                )
+            )
+        return verdicts
 
     # ── Verdict merging ─────────────────────────────────────────────────
 

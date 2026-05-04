@@ -602,3 +602,144 @@ def test_factory_critic_returns_deepseek_agent(monkeypatch):
     assert isinstance(critic, DeepSeekCriticAgent)
 
 
+# ── Verdict-only payload regression (model_construct bypass) ────────────
+
+
+def _verdict_only_response(items: list[dict]) -> dict:
+    """Mimic the real DeepSeek payload: only verdict fields per item."""
+    return {
+        "findings": [
+            {
+                "id": it["id"],
+                "critic_verdict": it.get("verdict", "CONFIRMED"),
+                "critic_rationale": it.get("rationale", "ok"),
+                "confidence_score": it.get("score", 0.85),
+                "flags": it.get("flags", []),
+            }
+            for it in items
+        ]
+    }
+
+
+def test_critic_accepts_verdict_only_payload_without_validation_error(monkeypatch):
+    """DeepSeek returns ONLY verdict fields (no sprint/tool/target/title…).
+    The previous Finding(**item) path raised ValidationError on every batch.
+    The fix uses Finding.model_construct() to build verdict stubs that bypass
+    Pydantic validation; _merge_verdicts then copies the verdict back onto
+    the original (fully validated) input findings.
+    """
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
+    f = _mk_finding(title="DMARC policy is p=none", severity="HIGH")
+    payload = _verdict_only_response(
+        [{"id": f.id, "verdict": "CONFIRMED", "score": 0.90, "rationale": "dig confirms"}]
+    )
+    fake, instance = _install_fake_openai(monkeypatch, payload)
+    instance.chat.completions.create.return_value = SimpleNamespace(
+        choices=[SimpleNamespace(
+            message=SimpleNamespace(content=json.dumps(payload)),
+            finish_reason="stop",
+        )],
+        usage=SimpleNamespace(prompt_tokens=100, completion_tokens=80),
+    )
+
+    from agents.deepseek_critic_agent import DeepSeekCriticAgent
+
+    out = DeepSeekCriticAgent().run([f])
+    assert len(out) == 1
+    # Output is the original (fully-formed) finding with verdict fields merged.
+    assert out[0].critic_verdict == "CONFIRMED"
+    assert out[0].confidence_score == 0.90
+    assert out[0].critic_rationale == "dig confirms"
+    # Required fields from the input survived untouched.
+    assert out[0].sprint == 1
+    assert out[0].title == "DMARC policy is p=none"
+    assert out[0].severity == "HIGH"
+
+
+def test_critic_drops_verdict_items_missing_id(monkeypatch):
+    """Verdict items without an `id` are silently dropped — _merge_verdicts
+    leaves the corresponding input finding PENDING. We don't want a single
+    malformed item from the LLM to crash the whole batch."""
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
+    f = _mk_finding(title="DMARC policy is p=none")
+    payload = {
+        "findings": [
+            {"id": f.id, "critic_verdict": "CONFIRMED",
+             "critic_rationale": "ok", "confidence_score": 0.9, "flags": []},
+            {"critic_verdict": "REJECTED", "confidence_score": 0.1},  # no id
+        ]
+    }
+    fake, instance = _install_fake_openai(monkeypatch, payload)
+    instance.chat.completions.create.return_value = SimpleNamespace(
+        choices=[SimpleNamespace(
+            message=SimpleNamespace(content=json.dumps(payload)),
+            finish_reason="stop",
+        )],
+        usage=SimpleNamespace(prompt_tokens=50, completion_tokens=40),
+    )
+
+    from agents.deepseek_critic_agent import DeepSeekCriticAgent
+
+    out = DeepSeekCriticAgent().run([f])
+    assert len(out) == 1
+    assert out[0].critic_verdict == "CONFIRMED"
+
+
+def test_critic_recovers_truncated_verdict_array(monkeypatch):
+    """If the LLM stream is cut mid-element, the prefix verdicts must still
+    be applied. Pinned because BaseAgent._recover_truncated_json is the only
+    safety net once finish_reason=length fires on a real run."""
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
+    findings = [_mk_finding(title=f"f{i}") for i in range(3)]
+
+    # Build a valid JSON array with 2 complete items, then a truncated 3rd.
+    full_items = [
+        {"id": findings[0].id, "critic_verdict": "CONFIRMED",
+         "critic_rationale": "ok", "confidence_score": 0.9, "flags": []},
+        {"id": findings[1].id, "critic_verdict": "NUANCED",
+         "critic_rationale": "context", "confidence_score": 0.6, "flags": []},
+    ]
+    truncated_text = (
+        "[" + ", ".join(json.dumps(it) for it in full_items)
+        + ', {"id": "broken-uuid", "critic_verdict": "CONF'
+    )
+
+    fake, instance = _install_fake_openai(monkeypatch, {})
+    instance.chat.completions.create.return_value = SimpleNamespace(
+        choices=[SimpleNamespace(
+            message=SimpleNamespace(content=truncated_text),
+            finish_reason="length",
+        )],
+        usage=SimpleNamespace(prompt_tokens=100, completion_tokens=2048),
+    )
+
+    from agents.deepseek_critic_agent import DeepSeekCriticAgent
+
+    with pytest.warns(RuntimeWarning, match="finish_reason=length"):
+        out = DeepSeekCriticAgent().run(findings)
+
+    # 2 verdicts recovered, 3rd stays PENDING.
+    assert out[0].critic_verdict == "CONFIRMED"
+    assert out[1].critic_verdict == "NUANCED"
+    assert out[2].critic_verdict == "PENDING"
+
+
+def test_critic_raises_value_error_on_unrecoverable_garbage(monkeypatch):
+    """Pure prose response (or empty stream) must raise ValueError naming
+    the failure mode so the operator sees what to lower."""
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
+    f = _mk_finding()
+    fake, instance = _install_fake_openai(monkeypatch, {})
+    instance.chat.completions.create.return_value = SimpleNamespace(
+        choices=[SimpleNamespace(
+            message=SimpleNamespace(content="this is just prose, not JSON"),
+            finish_reason="stop",
+        )],
+        usage=SimpleNamespace(prompt_tokens=50, completion_tokens=10),
+    )
+
+    from agents.deepseek_critic_agent import DeepSeekCriticAgent
+
+    with pytest.raises(ValueError, match="JSON invalide"):
+        DeepSeekCriticAgent().run([f])
+
