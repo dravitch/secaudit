@@ -244,18 +244,18 @@ def test_analyst_suppresses_known_false_positives_for_telemo(monkeypatch):
     assert "Certificate expires in <30 days" not in titles
 
 
-# ── HFCriticAgent ───────────────────────────────────────────────────────
+# ── DeepSeekCriticAgent ─────────────────────────────────────────────────
 
 
 def test_critic_raises_environment_error_when_token_missing(monkeypatch):
     """Same .env-resilient pattern as the analyst test — patch require_env
-    so the test holds whether or not HF_TOKEN is present in .env."""
+    so the test holds whether or not DEEPSEEK_API_KEY is present in .env."""
     from config import settings as cfg_settings
 
     real = cfg_settings.require_env
 
     def fake_require_env(var):
-        if var == "HF_TOKEN":
+        if var == "DEEPSEEK_API_KEY":
             raise EnvironmentError(
                 f"Required environment variable {var!r} is not set."
             )
@@ -263,10 +263,10 @@ def test_critic_raises_environment_error_when_token_missing(monkeypatch):
 
     monkeypatch.setattr(cfg_settings, "require_env", fake_require_env)
 
-    from agents.hf_critic_agent import HFCriticAgent
+    from agents.deepseek_critic_agent import DeepSeekCriticAgent
 
-    with pytest.raises(EnvironmentError, match="HF_TOKEN"):
-        HFCriticAgent()
+    with pytest.raises(EnvironmentError, match="DEEPSEEK_API_KEY"):
+        DeepSeekCriticAgent()
 
 
 def _critic_response(findings: list[Finding], assignments: dict) -> dict:
@@ -284,20 +284,20 @@ def _critic_response(findings: list[Finding], assignments: dict) -> dict:
 
 
 def test_critic_dmarc_p_none_is_confirmed_high_confidence(monkeypatch):
-    monkeypatch.setenv("HF_TOKEN", "hf_test")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
     f = _mk_finding(title="DMARC policy is p=none", severity="HIGH")
     _install_fake_openai(monkeypatch, _critic_response(
         [f], {f.id: {"verdict": "CONFIRMED", "score": 0.90, "rationale": "dig confirms"}}
     ))
-    from agents.hf_critic_agent import HFCriticAgent
+    from agents.deepseek_critic_agent import DeepSeekCriticAgent
 
-    out = HFCriticAgent().run([f])
+    out = DeepSeekCriticAgent().run([f])
     assert out[0].critic_verdict == "CONFIRMED"
     assert out[0].confidence_score >= 0.85
 
 
 def test_critic_hsts_with_imperva_waf_is_nuanced_context_dependent(monkeypatch):
-    monkeypatch.setenv("HF_TOKEN", "hf_test")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
     f = _mk_finding(title="HSTS header missing", severity="HIGH")
     _install_fake_openai(monkeypatch, _critic_response(
         [f], {f.id: {
@@ -306,15 +306,15 @@ def test_critic_hsts_with_imperva_waf_is_nuanced_context_dependent(monkeypatch):
             "flags": ["CONTEXT_DEPENDENT"],
         }}
     ))
-    from agents.hf_critic_agent import HFCriticAgent
+    from agents.deepseek_critic_agent import DeepSeekCriticAgent
 
-    out = HFCriticAgent().run([f])
+    out = DeepSeekCriticAgent().run([f])
     assert out[0].critic_verdict == "NUANCED"
     assert "CONTEXT_DEPENDENT" in out[0].flags
 
 
 def test_critic_typosquat_synthesis_with_corrected_spf_yields_nuanced(monkeypatch):
-    monkeypatch.setenv("HF_TOKEN", "hf_test")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
     f = _mk_finding(
         title="14 typosquat variants identified — phishing delivery surface",
         analyst_conclusion="SPF valide. Risque réel = DMARC p=none + DNSSEC absent.",
@@ -328,34 +328,34 @@ def test_critic_typosquat_synthesis_with_corrected_spf_yields_nuanced(monkeypatc
             "rationale": "Synthèse correcte mais non actionnable sans DNS lookup des variants",
         }}
     ))
-    from agents.hf_critic_agent import HFCriticAgent
+    from agents.deepseek_critic_agent import DeepSeekCriticAgent
 
-    out = HFCriticAgent().run([f])
+    out = DeepSeekCriticAgent().run([f])
     assert out[0].critic_verdict == "NUANCED"
     assert 0.60 <= out[0].confidence_score <= 0.70
 
 
 def test_critic_finding_with_no_evidence_is_rejected(monkeypatch):
-    monkeypatch.setenv("HF_TOKEN", "hf_test")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
     f = _mk_finding(evidence=[], severity="LOW")
     _install_fake_openai(monkeypatch, _critic_response(
         [f], {f.id: {"verdict": "REJECTED", "score": 0.10, "rationale": "no evidence cited"}}
     ))
-    from agents.hf_critic_agent import HFCriticAgent
+    from agents.deepseek_critic_agent import DeepSeekCriticAgent
 
-    out = HFCriticAgent().run([f])
+    out = DeepSeekCriticAgent().run([f])
     assert out[0].critic_verdict == "REJECTED"
 
 
 def test_critic_clamps_confidence_score_into_unit_interval(monkeypatch):
-    monkeypatch.setenv("HF_TOKEN", "hf_test")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
     f = _mk_finding()
     _install_fake_openai(monkeypatch, _critic_response(
         [f], {f.id: {"verdict": "CONFIRMED", "score": 0.99, "rationale": "ok"}}
     ))
-    from agents.hf_critic_agent import HFCriticAgent
+    from agents.deepseek_critic_agent import DeepSeekCriticAgent
 
-    out = HFCriticAgent().run([f])
+    out = DeepSeekCriticAgent().run([f])
     assert 0.0 <= out[0].confidence_score <= 1.0
 
 
@@ -400,7 +400,7 @@ def test_classify_rejected_always_rejected():
 def test_critic_disagreement_rate(findings_37_sample, monkeypatch):
     """CriticAgent doit NUANCED/REJECTED au moins 10% des findings.
     Mock distribution: ~80% CONFIRMED / 15% NUANCED / 5% REJECTED."""
-    monkeypatch.setenv("HF_TOKEN", "hf_test")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
 
     def assignments(findings: list[Finding]) -> dict:
         out = {}
@@ -427,9 +427,9 @@ def test_critic_disagreement_rate(findings_37_sample, monkeypatch):
         return _mock_openai_response(_critic_response(batch, a))
 
     _install_fake_openai(monkeypatch, response_payload=None, side_effect=per_batch_response)
-    from agents.hf_critic_agent import HFCriticAgent
+    from agents.deepseek_critic_agent import DeepSeekCriticAgent
 
-    out = HFCriticAgent().run(findings_37_sample)
+    out = DeepSeekCriticAgent().run(findings_37_sample)
     disagreements = sum(
         1 for f in out if f.critic_verdict in ("NUANCED", "REJECTED")
     )
@@ -521,7 +521,7 @@ def test_parse_findings_raises_on_unrecoverable_garbage():
 def test_critic_warns_on_finish_reason_length(monkeypatch, recwarn):
     """When the API returns finish_reason=length, _call_critic must warn
     so operators know to lower CRITIC_BATCH_SIZE."""
-    monkeypatch.setenv("HF_TOKEN", "hf_test")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
     f = _mk_finding(title="DMARC policy is p=none")
 
     fake = types.ModuleType("openai")
@@ -540,30 +540,29 @@ def test_critic_warns_on_finish_reason_length(monkeypatch, recwarn):
     )
     monkeypatch.setitem(sys.modules, "openai", fake)
 
-    from agents.hf_critic_agent import HFCriticAgent
+    from agents.deepseek_critic_agent import DeepSeekCriticAgent
 
-    HFCriticAgent().run([f])
+    DeepSeekCriticAgent().run([f])
     matched = [w for w in recwarn.list if "finish_reason=length" in str(w.message)]
     assert matched, f"expected RuntimeWarning, got {[str(w.message) for w in recwarn.list]}"
 
 
-def test_critic_uses_reduced_batch_size_and_max_tokens():
-    """Sanity check: constants stay at the tightened values that fit the
-    Fireworks-ai output cap that triggered Bug 2."""
-    from agents.hf_critic_agent import CRITIC_BATCH_SIZE, CRITIC_MAX_TOKENS
+def test_critic_uses_settings_batch_size_and_max_tokens(monkeypatch):
+    """The critic reads CRITIC_BATCH_SIZE / CRITIC_MAX_TOKENS from settings
+    so operators can tune them via .env without editing code."""
+    from config import settings as s
 
-    assert CRITIC_BATCH_SIZE <= 5
-    assert CRITIC_MAX_TOKENS <= 4096
-
-
-# ── DeepSeek reasoning_effort + Fallback wiring (Bug 3 regressions) ─────
+    assert s.CRITIC_BATCH_SIZE >= 1
+    assert s.CRITIC_MAX_TOKENS >= 512
 
 
-def test_critic_call_omits_extra_body_and_response_format(monkeypatch):
-    """Novita ne supporte pas extra_body={"reasoning_effort": ...} (BadRequest
-    400) ni response_format. Ce test fige l'absence des deux kwargs pour qu'un
-    refactor ne les réintroduise pas par accident."""
-    monkeypatch.setenv("HF_TOKEN", "hf_test")
+# ── DeepSeek native API regressions ─────────────────────────────────────
+
+
+def test_critic_call_targets_deepseek_native_endpoint(monkeypatch):
+    """The DeepSeek client must point at api.deepseek.com (not the HF router).
+    Pinning this prevents accidentally re-routing through HuggingFace."""
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
     f = _mk_finding(title="DMARC policy is p=none")
     payload = _critic_response(
         [f], {f.id: {"verdict": "CONFIRMED", "score": 0.9, "rationale": "ok"}}
@@ -577,34 +576,18 @@ def test_critic_call_omits_extra_body_and_response_format(monkeypatch):
         usage=SimpleNamespace(prompt_tokens=100, completion_tokens=200),
     )
 
-    from agents.hf_critic_agent import HFCriticAgent
+    from agents.deepseek_critic_agent import DeepSeekCriticAgent
 
-    HFCriticAgent().run([f])
-    call_kwargs = instance.chat.completions.create.call_args.kwargs
-    assert "extra_body" not in call_kwargs, (
-        "Novita rejette extra_body — laisser FallbackCriticAgent gérer "
-        "la consommation de tokens en raisonnement."
-    )
-    assert "response_format" not in call_kwargs
+    DeepSeekCriticAgent().run([f])
+    # OpenAI(...) was instantiated with base_url=DEEPSEEK_BASE_URL
+    init_kwargs = fake.OpenAI.call_args.kwargs
+    assert init_kwargs.get("base_url") == "https://api.deepseek.com/v1"
 
 
-def test_critic_uses_batch_size_one_for_deepseek_reasoning_overhead():
-    """DeepSeek consomme une partie des tokens de sortie en raisonnement.
-    BATCH_SIZE=1 garde la marge maximale pour que le JSON tienne dans le
-    plafond de sortie de Novita."""
-    from agents.hf_critic_agent import CRITIC_BATCH_SIZE
-
-    assert CRITIC_BATCH_SIZE == 1, (
-        f"CRITIC_BATCH_SIZE doit rester à 1 (Novita rejette reasoning_effort) — "
-        f"obtenu {CRITIC_BATCH_SIZE}"
-    )
-
-
-def test_factory_critic_returns_fallback_wrapper(monkeypatch):
-    """create_critic() must return a FallbackCriticAgent that wraps DeepSeek
-    and falls back to Gemma — not a bare HFCriticAgent."""
-    monkeypatch.setenv("HF_TOKEN", "hf_test")
-    monkeypatch.setenv("AGENT_PROVIDER_CRITIC", "huggingface")
+def test_factory_critic_returns_deepseek_agent(monkeypatch):
+    """create_critic() must return a DeepSeekCriticAgent when provider=deepseek."""
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
+    monkeypatch.setenv("AGENT_PROVIDER_CRITIC", "deepseek")
     _install_fake_openai(monkeypatch, {"findings": []})
 
     import importlib
@@ -614,99 +597,8 @@ def test_factory_critic_returns_fallback_wrapper(monkeypatch):
     importlib.reload(factory)
 
     critic = factory.create_critic()
-    from agents.factory import FallbackCriticAgent
-    from agents.hf_critic_agent import HFCriticAgent
+    from agents.deepseek_critic_agent import DeepSeekCriticAgent
 
-    assert isinstance(critic, FallbackCriticAgent)
-    assert isinstance(critic._primary, HFCriticAgent)
+    assert isinstance(critic, DeepSeekCriticAgent)
 
 
-def test_fallback_critic_triggers_on_primary_exception(monkeypatch):
-    """If the primary critic raises (e.g. ValueError on truncated JSON),
-    the wrapper must call the fallback and return its result."""
-    from agents.factory import FallbackCriticAgent
-    from agents.base import BaseAgent
-
-    f = _mk_finding(title="DMARC policy is p=none")
-
-    class BoomPrimary(BaseAgent):
-        model = "primary"
-        def run(self, findings):
-            raise ValueError("simulated truncated JSON")
-
-    class StubFallback(BaseAgent):
-        model = "fallback"
-        def __init__(self):
-            super().__init__(model="fallback")
-        def run(self, findings):
-            for fi in findings:
-                fi.critic_verdict = "CONFIRMED"
-                fi.critic_rationale = "fallback ran"
-                fi.confidence_score = 0.9
-            return findings
-
-    wrapper = FallbackCriticAgent(primary=BoomPrimary(model="primary"),
-                                   fallback_factory=StubFallback)
-    with pytest.warns(RuntimeWarning, match="Falling back"):
-        out = wrapper.run([f])
-    assert out[0].critic_rationale == "fallback ran"
-    assert wrapper._used_fallback is True
-
-
-def test_fallback_critic_triggers_when_too_many_pending(monkeypatch):
-    """If the primary returns OK but >30% findings stay PENDING, fallback fires."""
-    from agents.factory import FallbackCriticAgent
-    from agents.base import BaseAgent
-
-    findings = [_mk_finding(title=f"f{i}") for i in range(4)]
-
-    class HalfPending(BaseAgent):
-        model = "primary"
-        def run(self, findings):
-            # Set verdict on only 1/4 — leaves 3/4 PENDING (>30%).
-            findings[0].critic_verdict = "CONFIRMED"
-            findings[0].confidence_score = 0.9
-            return findings
-
-    class StubFallback(BaseAgent):
-        model = "fallback"
-        def __init__(self):
-            super().__init__(model="fallback")
-        def run(self, findings):
-            for fi in findings:
-                fi.critic_verdict = "CONFIRMED"
-                fi.critic_rationale = "fallback ran"
-                fi.confidence_score = 0.85
-            return findings
-
-    wrapper = FallbackCriticAgent(primary=HalfPending(model="primary"),
-                                   fallback_factory=StubFallback)
-    with pytest.warns(RuntimeWarning, match="Falling back"):
-        out = wrapper.run(findings)
-    assert all(f.critic_rationale == "fallback ran" for f in out)
-
-
-def test_fallback_critic_passthrough_when_primary_succeeds():
-    """No fallback when primary succeeds and PENDING ratio is acceptable."""
-    from agents.factory import FallbackCriticAgent
-    from agents.base import BaseAgent
-
-    findings = [_mk_finding(title=f"f{i}") for i in range(4)]
-
-    class GoodPrimary(BaseAgent):
-        model = "primary"
-        def run(self, findings):
-            for fi in findings:
-                fi.critic_verdict = "CONFIRMED"
-                fi.critic_rationale = "primary ran"
-                fi.confidence_score = 0.9
-            return findings
-
-    def fallback_factory():
-        raise AssertionError("fallback should not be called")
-
-    wrapper = FallbackCriticAgent(primary=GoodPrimary(model="primary"),
-                                   fallback_factory=fallback_factory)
-    out = wrapper.run(findings)
-    assert all(f.critic_rationale == "primary ran" for f in out)
-    assert wrapper._used_fallback is False

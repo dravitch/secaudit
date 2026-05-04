@@ -35,8 +35,10 @@ ANTHROPIC_PRICING = {
     "claude-sonnet-4-6": {"input": 3.00, "output": 15.00, "cache_read": 0.30},
     "claude-opus-4-7":   {"input": 15.00, "output": 75.00, "cache_read": 1.50},
 }
-HF_NOVITA_PRICING = {
-    "deepseek-ai/DeepSeek-V4-Pro": {"input": 0.27, "output": 1.10},
+DEEPSEEK_PRICING = {
+    # Native DeepSeek API pricing (api.deepseek.com), USD per 1M tokens.
+    "deepseek-chat":    {"input": 0.27, "output": 1.10},
+    "deepseek-reasoner": {"input": 0.55, "output": 2.19},
 }
 
 
@@ -97,7 +99,7 @@ def _build_cost_summary(metadata: Optional[dict]) -> Optional[dict]:
     analyst_model = _normalize_model(s5.get("analyst_model", ""))
     critic_model = _normalize_model(s5.get("critic_model", ""))
     analyst_pricing = ANTHROPIC_PRICING.get(analyst_model, {})
-    critic_pricing = HF_NOVITA_PRICING.get(critic_model, {})
+    critic_pricing = DEEPSEEK_PRICING.get(critic_model, {})
 
     analyst = _estimate_cost(s5.get("analyst_usage"), analyst_pricing)
     critic = _estimate_cost(s5.get("critic_usage"), critic_pricing)

@@ -22,14 +22,18 @@ except ImportError:
 
 # ── Provider selection ───────────────────────────────────────────────
 AGENT_PROVIDER_ANALYST = os.getenv("AGENT_PROVIDER_ANALYST", "anthropic")
-AGENT_PROVIDER_CRITIC = os.getenv("AGENT_PROVIDER_CRITIC", "huggingface")
+# `deepseek` (native API) by default. `huggingface` is no longer wired up
+# (HF Router/Novita rejected reasoning_effort + truncated payloads in production).
+AGENT_PROVIDER_CRITIC = os.getenv("AGENT_PROVIDER_CRITIC", "deepseek")
 
 # ── Model identifiers ────────────────────────────────────────────────
 ANALYST_MODEL = os.getenv("ANALYST_MODEL", "claude-sonnet-4-5")
-CRITIC_MODEL = os.getenv("CRITIC_MODEL", "deepseek-ai/DeepSeek-V4-Pro:novita")
+CRITIC_MODEL = os.getenv("CRITIC_MODEL", "deepseek-chat")
 
 # ── Critic determinism ───────────────────────────────────────────────
 CRITIC_TEMPERATURE = float(os.getenv("CRITIC_TEMPERATURE", "0"))
+CRITIC_BATCH_SIZE = int(os.getenv("CRITIC_BATCH_SIZE", "3"))
+CRITIC_MAX_TOKENS = int(os.getenv("CRITIC_MAX_TOKENS", "2048"))
 
 # ── Confidence thresholds (used by classify_finding) ─────────────────
 CONFIDENCE_THRESHOLD_CONFIRM = float(os.getenv("CONFIDENCE_THRESHOLD_CONFIRM", "0.75"))
