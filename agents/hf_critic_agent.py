@@ -23,7 +23,7 @@ from schemas.finding import Finding
 from agents.base import BaseAgent
 from config import settings
 
-CRITIC_BATCH_SIZE = 5
+CRITIC_BATCH_SIZE = 3
 CRITIC_MAX_TOKENS = 4096
 HF_BASE_URL = "https://router.huggingface.co/v1"
 
