@@ -148,9 +148,9 @@ def test_main_with_ai_raises_when_keys_missing(monkeypatch, tmp_path):
     import main
 
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
 
-    with pytest.raises(EnvironmentError, match="ANTHROPIC_API_KEY|HF_TOKEN"):
+    with pytest.raises(EnvironmentError, match="ANTHROPIC_API_KEY|DEEPSEEK_API_KEY"):
         main.run(
             target="telemo.gov.gn",
             sprints=[1, 2, 3, 4, 5],
@@ -165,7 +165,7 @@ def test_main_no_ai_does_not_require_keys(monkeypatch, tmp_path):
     import main
 
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
 
     monkeypatch.setattr("tools.recon.scan", lambda t: [])
     monkeypatch.setattr("tools.scanner.scan", lambda t: [_mk_finding()])
@@ -218,19 +218,21 @@ def test_main_loads_dotenv_at_import_before_check_env(tmp_path, monkeypatch):
     import main as main_mod
 
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
 
     # Put a .env next to main.py for this run.
     repo_root = Path(main_mod.__file__).resolve().parent
     env_path = repo_root / ".env"
     backup = env_path.read_text() if env_path.exists() else None
-    env_path.write_text("ANTHROPIC_API_KEY=sk-ant-from-dotenv\nHF_TOKEN=hf_from_dotenv\n")
+    env_path.write_text(
+        "ANTHROPIC_API_KEY=sk-ant-from-dotenv\nDEEPSEEK_API_KEY=sk-ds-from-dotenv\n"
+    )
     try:
         importlib.reload(main_mod)
         # _check_env should now see the keys via load_dotenv.
         info = main_mod._check_env(want_ai=True)
         assert info["anthropic"] is True
-        assert info["huggingface"] is True
+        assert info["critic_key_present"] is True
     finally:
         if backup is None:
             env_path.unlink(missing_ok=True)
@@ -246,7 +248,7 @@ def test_main_full_pipeline_with_ai_writes_report(monkeypatch, tmp_path):
     import main
 
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
-    monkeypatch.setenv("HF_TOKEN", "hf_test")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-ds-test")
 
     f1 = _mk_finding(sprint=1, title="A", severity="HIGH")
     f2 = _mk_finding(sprint=2, title="B", severity="MEDIUM")
@@ -267,7 +269,7 @@ def test_main_full_pipeline_with_ai_writes_report(monkeypatch, tmp_path):
             return findings
 
     class FakeCritic:
-        model = "deepseek-ai/DeepSeek-V4-Pro:novita"
+        model = "deepseek-chat"
         _total_usage = {"input_tokens": 80, "output_tokens": 20}
 
         def run(self, findings):

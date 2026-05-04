@@ -78,20 +78,30 @@ def _write_findings(findings: list[Finding], out_path: Path) -> None:
 
 
 def _check_env(want_ai: bool) -> dict:
-    """Return a small dict describing key presence (does not call APIs)."""
+    """Return a small dict describing key presence (does not call APIs).
+
+    The critic provider is read from AGENT_PROVIDER_CRITIC (default `deepseek`)
+    and the corresponding env var is required only when AI is enabled.
+    """
     import os
+
+    critic_provider = os.getenv("AGENT_PROVIDER_CRITIC", "deepseek")
+    critic_key_var = {
+        "deepseek": "DEEPSEEK_API_KEY",
+    }.get(critic_provider, "DEEPSEEK_API_KEY")
 
     info = {
         "anthropic": bool(os.getenv("ANTHROPIC_API_KEY")),
-        "huggingface": bool(os.getenv("HF_TOKEN")),
+        "critic_provider": critic_provider,
+        "critic_key_present": bool(os.getenv(critic_key_var)),
         "want_ai": want_ai,
     }
-    if want_ai and not (info["anthropic"] and info["huggingface"]):
-        missing = [
-            "ANTHROPIC_API_KEY" if not info["anthropic"] else None,
-            "HF_TOKEN" if not info["huggingface"] else None,
-        ]
-        missing = [m for m in missing if m]
+    if want_ai and not (info["anthropic"] and info["critic_key_present"]):
+        missing = []
+        if not info["anthropic"]:
+            missing.append("ANTHROPIC_API_KEY")
+        if not info["critic_key_present"]:
+            missing.append(critic_key_var)
         raise EnvironmentError(
             f"Missing env vars for the AI stage: {', '.join(missing)}. "
             f"Run `python test_api_keys.py` to diagnose, then re-run with "

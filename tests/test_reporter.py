@@ -121,7 +121,7 @@ def test_reporter_cost_estimate_present_in_annexe(tmp_path):
                 "after_analyst": 35,
                 "after_critic": 35,
                 "analyst_model": "claude-sonnet-4-5",
-                "critic_model": "deepseek-ai/DeepSeek-V4-Pro:novita",
+                "critic_model": "deepseek-chat",
                 "analyst_usage": {
                     "input_tokens": 12000,
                     "output_tokens": 3000,
@@ -135,7 +135,7 @@ def test_reporter_cost_estimate_present_in_annexe(tmp_path):
     md = reporter.render_markdown([f], target="telemo.gov.gn", metadata=metadata)
     assert "Coût total estimé" in md
     assert "claude-sonnet-4-5" in md
-    assert "deepseek-ai/DeepSeek-V4-Pro" in md
+    assert "deepseek-chat" in md
     # 12000 input tokens shown.
     assert "12000" in md
 
