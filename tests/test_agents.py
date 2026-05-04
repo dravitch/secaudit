@@ -559,11 +559,10 @@ def test_critic_uses_reduced_batch_size_and_max_tokens():
 # ── DeepSeek reasoning_effort + Fallback wiring (Bug 3 regressions) ─────
 
 
-def test_critic_call_passes_reasoning_effort_disabled(monkeypatch):
-    """DeepSeek V4 Pro is a reasoning model — without reasoning_effort=disabled
-    it consumes all output tokens in internal reasoning before emitting the
-    JSON. This test pins the kwarg so a future refactor can't silently drop it.
-    """
+def test_critic_call_omits_extra_body_and_response_format(monkeypatch):
+    """Novita ne supporte pas extra_body={"reasoning_effort": ...} (BadRequest
+    400) ni response_format. Ce test fige l'absence des deux kwargs pour qu'un
+    refactor ne les réintroduise pas par accident."""
     monkeypatch.setenv("HF_TOKEN", "hf_test")
     f = _mk_finding(title="DMARC policy is p=none")
     payload = _critic_response(
@@ -582,13 +581,23 @@ def test_critic_call_passes_reasoning_effort_disabled(monkeypatch):
 
     HFCriticAgent().run([f])
     call_kwargs = instance.chat.completions.create.call_args.kwargs
-    assert call_kwargs.get("extra_body") == {"reasoning_effort": "disabled"}, (
-        "DeepSeek call must include extra_body={'reasoning_effort': 'disabled'} "
-        "to bypass internal reasoning that would consume all output tokens."
+    assert "extra_body" not in call_kwargs, (
+        "Novita rejette extra_body — laisser FallbackCriticAgent gérer "
+        "la consommation de tokens en raisonnement."
     )
-    # Also pin: response_format must NOT be set (some HF Router providers reject
-    # it when reasoning_effort is in extra_body).
     assert "response_format" not in call_kwargs
+
+
+def test_critic_uses_batch_size_one_for_deepseek_reasoning_overhead():
+    """DeepSeek consomme une partie des tokens de sortie en raisonnement.
+    BATCH_SIZE=1 garde la marge maximale pour que le JSON tienne dans le
+    plafond de sortie de Novita."""
+    from agents.hf_critic_agent import CRITIC_BATCH_SIZE
+
+    assert CRITIC_BATCH_SIZE == 1, (
+        f"CRITIC_BATCH_SIZE doit rester à 1 (Novita rejette reasoning_effort) — "
+        f"obtenu {CRITIC_BATCH_SIZE}"
+    )
 
 
 def test_factory_critic_returns_fallback_wrapper(monkeypatch):
