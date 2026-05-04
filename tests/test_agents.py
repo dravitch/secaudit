@@ -467,3 +467,90 @@ def test_factory_unknown_critic_provider_raises(monkeypatch):
 
     with pytest.raises(ValueError, match="Provider critic inconnu"):
         factory.create_critic()
+
+
+# ── Hardened parser (truncated / empty LLM responses) ───────────────────
+
+
+def test_parse_findings_raises_on_empty_response():
+    """Empty LLM content → ValueError naming the failure mode."""
+    from agents.base import BaseAgent
+
+    class _T(BaseAgent):
+        def run(self, findings):
+            return findings
+
+    agent = _T(model="x")
+    with pytest.raises(ValueError, match="empty content"):
+        agent._parse_findings("   \n\n  ")
+
+
+def test_parse_findings_recovers_truncated_array():
+    """An array truncated mid-element should yield the parseable prefix."""
+    from agents.base import BaseAgent
+
+    class _T(BaseAgent):
+        def run(self, findings):
+            return findings
+
+    f = _mk_finding(title="Sample")
+    full_item = json.loads(f.model_dump_json())
+    full_item["critic_verdict"] = "CONFIRMED"
+    full_item["critic_rationale"] = "ok"
+    full_item["confidence_score"] = 0.85
+    # Build an array with one valid object then a truncated second one.
+    truncated = (
+        '[' + json.dumps(full_item) + ', {"id": "broken-uuid", "sprint": '
+    )
+    out = _T(model="x")._parse_findings(truncated)
+    assert len(out) == 1
+    assert out[0].title == "Sample"
+
+
+def test_parse_findings_raises_on_unrecoverable_garbage():
+    from agents.base import BaseAgent
+
+    class _T(BaseAgent):
+        def run(self, findings):
+            return findings
+
+    with pytest.raises(ValueError, match="not valid JSON"):
+        _T(model="x")._parse_findings("this is just prose, not JSON at all")
+
+
+def test_critic_warns_on_finish_reason_length(monkeypatch, recwarn):
+    """When the API returns finish_reason=length, _call_critic must warn
+    so operators know to lower CRITIC_BATCH_SIZE."""
+    monkeypatch.setenv("HF_TOKEN", "hf_test")
+    f = _mk_finding(title="DMARC policy is p=none")
+
+    fake = types.ModuleType("openai")
+    fake.OpenAI = MagicMock()
+    instance = fake.OpenAI.return_value
+    payload = _critic_response(
+        [f], {f.id: {"verdict": "CONFIRMED", "score": 0.9, "rationale": "ok"}}
+    )
+    text = json.dumps(payload)
+    instance.chat.completions.create.return_value = SimpleNamespace(
+        choices=[SimpleNamespace(
+            message=SimpleNamespace(content=text),
+            finish_reason="length",
+        )],
+        usage=SimpleNamespace(prompt_tokens=100, completion_tokens=4096),
+    )
+    monkeypatch.setitem(sys.modules, "openai", fake)
+
+    from agents.hf_critic_agent import HFCriticAgent
+
+    HFCriticAgent().run([f])
+    matched = [w for w in recwarn.list if "finish_reason=length" in str(w.message)]
+    assert matched, f"expected RuntimeWarning, got {[str(w.message) for w in recwarn.list]}"
+
+
+def test_critic_uses_reduced_batch_size_and_max_tokens():
+    """Sanity check: constants stay at the tightened values that fit the
+    Fireworks-ai output cap that triggered Bug 2."""
+    from agents.hf_critic_agent import CRITIC_BATCH_SIZE, CRITIC_MAX_TOKENS
+
+    assert CRITIC_BATCH_SIZE <= 5
+    assert CRITIC_MAX_TOKENS <= 4096

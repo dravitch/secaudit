@@ -32,6 +32,17 @@ from typing import Optional
 # Allow running as a script (`python main.py ...`).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+# Load .env BEFORE any module that reads env vars at import time.
+# `_check_env()` below uses os.getenv() and runs before any agent import,
+# so config.settings' own load_dotenv() is too late. override=False keeps
+# shell-exported vars (NixOS, CI) winning over the .env file.
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv(Path(__file__).resolve().parent / ".env", override=False)
+except ImportError:
+    pass
+
 import typer
 from rich.console import Console
 from rich.table import Table

@@ -55,5 +55,15 @@ pkgs.mkShell {
 
     export SECAUDIT_ENV=nixos
     echo "[ok] Environment activated — python: $(python --version)"
+
+    # Auto-source .env so subprocess shells (testssl.sh, dig) and
+    # one-shot Python scripts inherit ANTHROPIC_API_KEY / HF_TOKEN.
+    # Python's load_dotenv() only feeds the calling process — children miss it.
+    if [ -f .env ]; then
+      set -a
+      source .env
+      set +a
+      echo "[env] .env chargé automatiquement"
+    fi
   '';
 }
