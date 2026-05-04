@@ -6,9 +6,18 @@ CriticAgent contradictoire — DeepSeek V4 Pro via le router HuggingFace
 Architecture multi-fournisseurs : éviter la chambre d'écho en utilisant
 un modèle entraîné par un fournisseur indépendant de l'analyste Anthropic.
 
+⚠ DeepSeek V4 Pro est un modèle à raisonnement. Sans `reasoning_effort=
+disabled`, il consomme tous ses tokens de sortie en réflexion interne
+avant de produire le moindre caractère JSON, ce qui aboutit à
+finish_reason=length avec content vide. On force donc :
+    extra_body={"reasoning_effort": "disabled"}
+Sans ce flag, prévoir un fallback (voir agents.factory.FallbackCriticAgent).
+
 Contraintes :
 - temperature=0 (déterministe, reproductible)
-- response_format={"type": "json_object"}
+- reasoning_effort=disabled (sinon : tokens consommés en raisonnement)
+- PAS de response_format=json_object (certains providers HF Router ne le
+  supportent pas avec reasoning_effort) — instruction textuelle à la place
 - Traitement par batches
 - EnvironmentError si HF_TOKEN absent
 """
@@ -23,8 +32,8 @@ from schemas.finding import Finding
 from agents.base import BaseAgent
 from config import settings
 
-CRITIC_BATCH_SIZE = 5
-CRITIC_MAX_TOKENS = 4096
+CRITIC_BATCH_SIZE = 3
+CRITIC_MAX_TOKENS = 2048
 HF_BASE_URL = "https://router.huggingface.co/v1"
 
 CRITIC_SYSTEM_PROMPT = """\
@@ -59,7 +68,15 @@ Verdicts attendus pour les cas connus :
 Retourne UNIQUEMENT un objet JSON {"findings": [<Finding>, ...]} où chaque
 Finding inclut TOUS les champs originaux du schéma + critic_verdict,
 critic_rationale, confidence_score, flags mis à jour.
-Pas de markdown, pas de prose, uniquement JSON.
+
+Exemple de sortie attendue (format strict) :
+{"findings": [
+  {"id": "abc-123", "critic_verdict": "CONFIRMED",
+   "critic_rationale": "Evidence dig TXT confirme l'absence de DMARC.",
+   "confidence_score": 0.90, "flags": []}
+]}
+
+Pas de texte avant ou après le JSON. Pas de markdown. Pas de prose.
 """
 
 
@@ -110,7 +127,6 @@ class HFCriticAgent(BaseAgent):
             model=self.model,
             temperature=self.temperature,
             max_tokens=CRITIC_MAX_TOKENS,
-            response_format={"type": "json_object"},
             messages=[
                 {"role": "system", "content": CRITIC_SYSTEM_PROMPT},
                 {
@@ -120,6 +136,7 @@ class HFCriticAgent(BaseAgent):
                     ),
                 },
             ],
+            extra_body={"reasoning_effort": "disabled"},
         )
         choice = response.choices[0]
         text = choice.message.content or ""

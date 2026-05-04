@@ -554,3 +554,150 @@ def test_critic_uses_reduced_batch_size_and_max_tokens():
 
     assert CRITIC_BATCH_SIZE <= 5
     assert CRITIC_MAX_TOKENS <= 4096
+
+
+# ── DeepSeek reasoning_effort + Fallback wiring (Bug 3 regressions) ─────
+
+
+def test_critic_call_passes_reasoning_effort_disabled(monkeypatch):
+    """DeepSeek V4 Pro is a reasoning model — without reasoning_effort=disabled
+    it consumes all output tokens in internal reasoning before emitting the
+    JSON. This test pins the kwarg so a future refactor can't silently drop it.
+    """
+    monkeypatch.setenv("HF_TOKEN", "hf_test")
+    f = _mk_finding(title="DMARC policy is p=none")
+    payload = _critic_response(
+        [f], {f.id: {"verdict": "CONFIRMED", "score": 0.9, "rationale": "ok"}}
+    )
+    fake, instance = _install_fake_openai(monkeypatch, payload)
+    instance.chat.completions.create.return_value = SimpleNamespace(
+        choices=[SimpleNamespace(
+            message=SimpleNamespace(content=json.dumps(payload)),
+            finish_reason="stop",
+        )],
+        usage=SimpleNamespace(prompt_tokens=100, completion_tokens=200),
+    )
+
+    from agents.hf_critic_agent import HFCriticAgent
+
+    HFCriticAgent().run([f])
+    call_kwargs = instance.chat.completions.create.call_args.kwargs
+    assert call_kwargs.get("extra_body") == {"reasoning_effort": "disabled"}, (
+        "DeepSeek call must include extra_body={'reasoning_effort': 'disabled'} "
+        "to bypass internal reasoning that would consume all output tokens."
+    )
+    # Also pin: response_format must NOT be set (some HF Router providers reject
+    # it when reasoning_effort is in extra_body).
+    assert "response_format" not in call_kwargs
+
+
+def test_factory_critic_returns_fallback_wrapper(monkeypatch):
+    """create_critic() must return a FallbackCriticAgent that wraps DeepSeek
+    and falls back to Gemma — not a bare HFCriticAgent."""
+    monkeypatch.setenv("HF_TOKEN", "hf_test")
+    monkeypatch.setenv("AGENT_PROVIDER_CRITIC", "huggingface")
+    _install_fake_openai(monkeypatch, {"findings": []})
+
+    import importlib
+    from config import settings as s
+    importlib.reload(s)
+    from agents import factory
+    importlib.reload(factory)
+
+    critic = factory.create_critic()
+    from agents.factory import FallbackCriticAgent
+    from agents.hf_critic_agent import HFCriticAgent
+
+    assert isinstance(critic, FallbackCriticAgent)
+    assert isinstance(critic._primary, HFCriticAgent)
+
+
+def test_fallback_critic_triggers_on_primary_exception(monkeypatch):
+    """If the primary critic raises (e.g. ValueError on truncated JSON),
+    the wrapper must call the fallback and return its result."""
+    from agents.factory import FallbackCriticAgent
+    from agents.base import BaseAgent
+
+    f = _mk_finding(title="DMARC policy is p=none")
+
+    class BoomPrimary(BaseAgent):
+        model = "primary"
+        def run(self, findings):
+            raise ValueError("simulated truncated JSON")
+
+    class StubFallback(BaseAgent):
+        model = "fallback"
+        def __init__(self):
+            super().__init__(model="fallback")
+        def run(self, findings):
+            for fi in findings:
+                fi.critic_verdict = "CONFIRMED"
+                fi.critic_rationale = "fallback ran"
+                fi.confidence_score = 0.9
+            return findings
+
+    wrapper = FallbackCriticAgent(primary=BoomPrimary(model="primary"),
+                                   fallback_factory=StubFallback)
+    with pytest.warns(RuntimeWarning, match="Falling back"):
+        out = wrapper.run([f])
+    assert out[0].critic_rationale == "fallback ran"
+    assert wrapper._used_fallback is True
+
+
+def test_fallback_critic_triggers_when_too_many_pending(monkeypatch):
+    """If the primary returns OK but >30% findings stay PENDING, fallback fires."""
+    from agents.factory import FallbackCriticAgent
+    from agents.base import BaseAgent
+
+    findings = [_mk_finding(title=f"f{i}") for i in range(4)]
+
+    class HalfPending(BaseAgent):
+        model = "primary"
+        def run(self, findings):
+            # Set verdict on only 1/4 — leaves 3/4 PENDING (>30%).
+            findings[0].critic_verdict = "CONFIRMED"
+            findings[0].confidence_score = 0.9
+            return findings
+
+    class StubFallback(BaseAgent):
+        model = "fallback"
+        def __init__(self):
+            super().__init__(model="fallback")
+        def run(self, findings):
+            for fi in findings:
+                fi.critic_verdict = "CONFIRMED"
+                fi.critic_rationale = "fallback ran"
+                fi.confidence_score = 0.85
+            return findings
+
+    wrapper = FallbackCriticAgent(primary=HalfPending(model="primary"),
+                                   fallback_factory=StubFallback)
+    with pytest.warns(RuntimeWarning, match="Falling back"):
+        out = wrapper.run(findings)
+    assert all(f.critic_rationale == "fallback ran" for f in out)
+
+
+def test_fallback_critic_passthrough_when_primary_succeeds():
+    """No fallback when primary succeeds and PENDING ratio is acceptable."""
+    from agents.factory import FallbackCriticAgent
+    from agents.base import BaseAgent
+
+    findings = [_mk_finding(title=f"f{i}") for i in range(4)]
+
+    class GoodPrimary(BaseAgent):
+        model = "primary"
+        def run(self, findings):
+            for fi in findings:
+                fi.critic_verdict = "CONFIRMED"
+                fi.critic_rationale = "primary ran"
+                fi.confidence_score = 0.9
+            return findings
+
+    def fallback_factory():
+        raise AssertionError("fallback should not be called")
+
+    wrapper = FallbackCriticAgent(primary=GoodPrimary(model="primary"),
+                                   fallback_factory=fallback_factory)
+    out = wrapper.run(findings)
+    assert all(f.critic_rationale == "primary ran" for f in out)
+    assert wrapper._used_fallback is False

@@ -23,6 +23,9 @@ __pycache__/
 result
 result-*
 
+# Debug scripts (locaux, non commités)
+debug_*.py
+
 # Éditeurs
 .vscode/
 .idea/
