@@ -6,19 +6,19 @@ CriticAgent contradictoire — DeepSeek V4 Pro via le router HuggingFace
 Architecture multi-fournisseurs : éviter la chambre d'écho en utilisant
 un modèle entraîné par un fournisseur indépendant de l'analyste Anthropic.
 
-⚠ DeepSeek V4 Pro est un modèle à raisonnement. Sans `reasoning_effort=
-disabled`, il consomme tous ses tokens de sortie en réflexion interne
-avant de produire le moindre caractère JSON, ce qui aboutit à
-finish_reason=length avec content vide. On force donc :
-    extra_body={"reasoning_effort": "disabled"}
-Sans ce flag, prévoir un fallback (voir agents.factory.FallbackCriticAgent).
+⚠ DeepSeek V4 Pro est un modèle à raisonnement. Le provider Novita ne
+supporte pas extra_body={"reasoning_effort": "disabled"} (BadRequest
+400 sur le router HF). Stratégie de mitigation effective :
+- BATCH_SIZE = 1 (un seul finding par appel → marge maximale de tokens)
+- max_tokens = 2048
+- FallbackCriticAgent enveloppe l'agent : bascule sur Gemma 4 31B
+  (modèle non-raisonnement) si DeepSeek tronque ou laisse trop de PENDING.
 
 Contraintes :
 - temperature=0 (déterministe, reproductible)
-- reasoning_effort=disabled (sinon : tokens consommés en raisonnement)
-- PAS de response_format=json_object (certains providers HF Router ne le
-  supportent pas avec reasoning_effort) — instruction textuelle à la place
-- Traitement par batches
+- PAS de response_format=json_object (certains providers HF Router le
+  rejettent) — instruction textuelle dans le prompt à la place
+- Traitement finding-par-finding (BATCH_SIZE=1)
 - EnvironmentError si HF_TOKEN absent
 """
 from __future__ import annotations
@@ -32,7 +32,7 @@ from schemas.finding import Finding
 from agents.base import BaseAgent
 from config import settings
 
-CRITIC_BATCH_SIZE = 3
+CRITIC_BATCH_SIZE = 1
 CRITIC_MAX_TOKENS = 2048
 HF_BASE_URL = "https://router.huggingface.co/v1"
 
@@ -136,7 +136,6 @@ class HFCriticAgent(BaseAgent):
                     ),
                 },
             ],
-            extra_body={"reasoning_effort": "disabled"},
         )
         choice = response.choices[0]
         text = choice.message.content or ""

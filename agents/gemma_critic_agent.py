@@ -39,7 +39,7 @@ class GemmaCriticAgent(BaseAgent):
     ):
         super().__init__(
             model=model
-            or os.getenv("FALLBACK_CRITIC_MODEL", "google/gemma-3-27b-it:novita"),
+            or os.getenv("FALLBACK_CRITIC_MODEL", "google/gemma-4-31B-it:novita"),
             temperature=temperature,
         )
         token = settings.require_env("HF_TOKEN")
