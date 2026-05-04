@@ -204,6 +204,40 @@ def test_parse_sprints_rejects_out_of_range():
         main._parse_sprints("6")
 
 
+def test_main_loads_dotenv_at_import_before_check_env(tmp_path, monkeypatch):
+    """Bug 1 regression: main.py must load .env BEFORE _check_env() reads
+    os.getenv(). Otherwise the AI stage rejects valid keys with
+    EnvironmentError because config.settings is only imported later (inside
+    _run_sprint5).
+
+    We assert the symptom: with both keys in a .env file at the repo root
+    (and NOT in the shell env), main.run(want_ai=True) must NOT raise
+    EnvironmentError before any sprint runs.
+    """
+    import importlib
+    import main as main_mod
+
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+
+    # Put a .env next to main.py for this run.
+    repo_root = Path(main_mod.__file__).resolve().parent
+    env_path = repo_root / ".env"
+    backup = env_path.read_text() if env_path.exists() else None
+    env_path.write_text("ANTHROPIC_API_KEY=sk-ant-from-dotenv\nHF_TOKEN=hf_from_dotenv\n")
+    try:
+        importlib.reload(main_mod)
+        # _check_env should now see the keys via load_dotenv.
+        info = main_mod._check_env(want_ai=True)
+        assert info["anthropic"] is True
+        assert info["huggingface"] is True
+    finally:
+        if backup is None:
+            env_path.unlink(missing_ok=True)
+        else:
+            env_path.write_text(backup)
+
+
 # ── End-to-end with stubbed agents (no real LLM call) ────────────────
 
 

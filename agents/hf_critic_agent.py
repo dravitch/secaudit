@@ -16,14 +16,15 @@ from __future__ import annotations
 
 import json
 import os
+import warnings
 from typing import Optional
 
 from schemas.finding import Finding
 from agents.base import BaseAgent
 from config import settings
 
-CRITIC_BATCH_SIZE = 10
-CRITIC_MAX_TOKENS = 8000
+CRITIC_BATCH_SIZE = 5
+CRITIC_MAX_TOKENS = 4096
 HF_BASE_URL = "https://router.huggingface.co/v1"
 
 CRITIC_SYSTEM_PROMPT = """\
@@ -120,7 +121,9 @@ class HFCriticAgent(BaseAgent):
                 },
             ],
         )
-        text = response.choices[0].message.content or ""
+        choice = response.choices[0]
+        text = choice.message.content or ""
+        finish_reason = getattr(choice, "finish_reason", None)
         usage = getattr(response, "usage", None)
         if usage is not None:
             self._total_usage["input_tokens"] += int(
@@ -129,6 +132,18 @@ class HFCriticAgent(BaseAgent):
             self._total_usage["output_tokens"] += int(
                 getattr(usage, "completion_tokens", 0) or 0
             )
+        if finish_reason == "length":
+            warnings.warn(
+                f"CriticAgent: finish_reason=length (batch={len(batch)}, "
+                f"max_tokens={CRITIC_MAX_TOKENS}, output_tokens="
+                f"{getattr(usage, 'completion_tokens', '?')}). "
+                f"Réponse tronquée — réduire CRITIC_BATCH_SIZE si parsing échoue.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            self._last_finish_reason = "length"
+        else:
+            self._last_finish_reason = finish_reason
         return self._parse_findings(text)
 
     # ── Verdict merging ─────────────────────────────────────────────────
