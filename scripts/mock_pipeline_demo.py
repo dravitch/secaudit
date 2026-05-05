@@ -1,18 +1,19 @@
 """
-tools/mock_pipeline_demo.py
+scripts/mock_pipeline_demo.py
 Run the AnalystAgent + CriticAgent pipeline against the local results/
-findings, with both LLM calls mocked. Used when ANTHROPIC_API_KEY / HF_TOKEN
-are not available in the dev sandbox — mirrors the live run shape exactly
-so verdicts and the rich summary table are inspectable on a fresh checkout.
+findings, with both LLM calls mocked. Used when ANTHROPIC_API_KEY /
+DEEPSEEK_API_KEY are not available in the dev sandbox — mirrors the live
+run shape exactly so verdicts and the rich summary table are inspectable
+on a fresh checkout.
 
 Mocking strategy:
   - AnalystAgent's anthropic call is replaced with a deterministic stub
     that returns analyst_conclusion enrichments (no cvss_score updates).
-  - HFCriticAgent's openai call is replaced with a stub that assigns
-    verdicts via the same 80/15/5 distribution used in the disagreement
-    test. Adversarial overrides are applied for the canonical findings
-    documented in CRITIC_SYSTEM_PROMPT (DMARC p=none, DNSSEC, HSTS+WAF,
-    favicon, typosquat synthesis, etc.).
+  - DeepSeekCriticAgent's openai call is replaced with a stub that
+    assigns verdicts via the same 80/15/5 distribution used in the
+    disagreement test. Adversarial overrides are applied for the
+    canonical findings documented in CRITIC_SYSTEM_PROMPT (DMARC p=none,
+    DNSSEC, HSTS+WAF, favicon, typosquat synthesis, etc.).
 """
 from __future__ import annotations
 
@@ -155,7 +156,7 @@ def main():
     print(f"[load] {len(findings)} raw findings from results/")
 
     os.environ.setdefault("ANTHROPIC_API_KEY", "sk-ant-mock")
-    os.environ.setdefault("HF_TOKEN", "hf_mock")
+    os.environ.setdefault("DEEPSEEK_API_KEY", "sk-ds-mock")
 
     _install_anthropic_stub()
     _install_openai_stub(findings)

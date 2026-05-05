@@ -9,14 +9,16 @@ Sprint 3 (passive HTTP) :
   - WAF/CDN signature (Imperva ipmsperf_uuid) — enrichissement Sprint 1.
   - Favicon fingerprinting : SHA256 du contenu pour détection clones.
 
-Sprint 4 (passif, génération pure) :
-  - generate_typosquats(domain) → ≤15 variantes (homoglyphes, tirets,
-    suppression .gov, préfixes, gouv variant). Aucun appel DNS.
-  - 1 Finding HIGH PHISHING_VECTOR par variante.
+Sprint 4 (passif, génération + meta-WHOIS) :
+  - generate_typosquats(domain) → ≤15 variantes, filtrées contre les
+    Restricted TLDs (.gov.gn, .gouv.gn — WhoisFreaks). Aucun appel DNS
+    sur les variantes elles-mêmes.
+  - 1 Finding HIGH PHISHING_VECTOR par variante restante.
   - 1 Finding CRITICAL synthèse PHISHING_VECTOR + CHAIN_DEPENDENCY.
 
 Mindset 13 — passif strict : aucun formulaire soumis, aucune authentification
-tentée. Lecture seule des pages publiques.
+tentée. Le seul appel réseau hors target est la lookup WhoisFreaks pour
+classer le TLD (registrable ou restricted), pas le target lui-même.
 """
 from __future__ import annotations
 
@@ -24,6 +26,7 @@ import hashlib
 import json
 import sys
 import uuid
+import warnings
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -47,6 +50,8 @@ LOGIN_PATHS = ("/", "/connexion", "/login", "/auth")
 FAVICON_PATHS = ("/favicon.ico", "/favicon.png")
 MAX_TYPOSQUATS = 15
 WAF_IMPERVA_COOKIES = ("ipmsperf_uuid",)
+WHOIS_LOOKUP_TIMEOUT_SEC = 5.0
+WHOIS_LOOKUP_URL = "https://whoisfreaks.com/tools/whois/lookup/{tld}"
 
 app = typer.Typer(add_completion=False)
 
@@ -271,15 +276,56 @@ def fingerprint_favicon(client: httpx.Client, base_url: str, target: str) -> lis
     )]
 
 
-# ── Sprint 4 — typosquat generator ───────────────────────────────────
+# ── Sprint 4 — typosquat generator + WHOIS TLD filter ───────────────
 
 
-def _split_domain(domain: str) -> tuple[str, str]:
-    """Split 'foo.gov.gn' → ('foo', '.gov.gn'). Falls back to last 2 labels."""
+# Module-level cache of TLD → restricted? lookups.
+# Key = TLD without leading dot (e.g. "gov.gn", "gn").
+_DOMAIN_RESTRICTION_CACHE: dict[str, bool] = {}
+
+
+def check_domain_restriction(tld: str, *, timeout: float = WHOIS_LOOKUP_TIMEOUT_SEC) -> bool:
+    """Return True iff `tld` is a Restricted Domain per WhoisFreaks.
+
+    Hits https://whoisfreaks.com/tools/whois/lookup/<tld> once per TLD per
+    process (cache) and looks for 'Restricted Domain' in the HTML. On any
+    network/timeout error, returns False (default to "registrable" so a
+    flaky network doesn't silently drop variants — the operator sees them
+    in the report and can flag manually).
+    """
+    key = tld.lstrip(".")
+    if key in _DOMAIN_RESTRICTION_CACHE:
+        return _DOMAIN_RESTRICTION_CACHE[key]
+    url = WHOIS_LOOKUP_URL.format(tld=key)
+    try:
+        with httpx.Client(timeout=timeout, follow_redirects=True) as client:
+            resp = client.get(url, headers={"User-Agent": USER_AGENT})
+        body = (resp.text or "").lower()
+        restricted = "restricted domain" in body
+    except (httpx.RequestError, httpx.TimeoutException) as exc:
+        warnings.warn(
+            f"WHOIS lookup failed for TLD {tld!r} ({type(exc).__name__}); "
+            f"assuming registrable. Variants under this TLD will be kept.",
+            RuntimeWarning, stacklevel=2,
+        )
+        restricted = False
+    _DOMAIN_RESTRICTION_CACHE[key] = restricted
+    return restricted
+
+
+def _split_domain(domain: str) -> tuple[str, str, str]:
+    """Split 'foo.gov.gn' → ('foo', '.gov.gn', '.gn').
+
+    Returns (label, full_suffix, base_tld) where base_tld is the last
+    label only — used as the registrable-TLD anchor for free variants.
+    """
     parts = domain.split(".")
-    if len(parts) >= 3:
-        return parts[0], "." + ".".join(parts[1:])
-    return parts[0], "." + ".".join(parts[1:]) if len(parts) > 1 else ("", "")
+    if len(parts) >= 2:
+        label = parts[0]
+        full_suffix = "." + ".".join(parts[1:])
+        base_tld = "." + parts[-1]
+        return label, full_suffix, base_tld
+    return domain, "", ""
 
 
 HOMOGLYPH_MAP = {"l": "1", "o": "0", "e": "3", "a": "@"}
@@ -309,38 +355,58 @@ def _hyphen_variants(label: str) -> list[tuple[str, str]]:
 def generate_typosquats(domain: str) -> list[tuple[str, str]]:
     """Generate up to MAX_TYPOSQUATS typosquat variants for a given domain.
 
-    Returns a list of (candidate_domain, transformation_rule). Order is
-    stable: homoglyphs first (most common phishing technique), then hyphen
-    insertions, then level-strip / prefix / suffix / gouv variant.
-    Pure generation — no DNS lookup, no network call.
+    Filters out variants on Restricted TLDs (e.g. .gov.gn, .gouv.gn) using
+    WhoisFreaks lookups — those domains cannot be registered by an
+    attacker so the variant is non-exploitable. Variants on the free base
+    TLD (e.g. .gn) are always kept.
+
+    Returns a list of (candidate_domain, transformation_rule). Order:
+    homoglyphs first, then merged hyphens, then level-strip, then full
+    set on any other registrable TLD. Pure generation modulo the WHOIS
+    lookup cached call — no DNS, no SMTP.
     """
-    label, suffix = _split_domain(domain)
+    label, full_suffix, base_tld = _split_domain(domain)
     candidates: list[tuple[str, str]] = []
 
-    for variant, rule in _homoglyph_variants(label):
-        candidates.append((variant + suffix, rule))
+    # ── Free base TLD (.gn) — always safe ───────────────────────────
+    # Homoglyph substitutions on the label.
+    for variant_label, rule in _homoglyph_variants(label):
+        candidates.append((variant_label + base_tld, f"{rule} on free TLD"))
 
-    for variant, rule in _hyphen_variants(label):
-        candidates.append((variant + suffix, rule))
-
-    # Level-strip: drop the .gov label if present.
-    if ".gov." in suffix:
-        stripped = suffix.replace(".gov.", ".", 1)
-        candidates.append((label + stripped, "drop .gov subdomain level"))
-
-    # Prefix / suffix wrappers.
-    for tpl, rule in [
-        (f"www-{label}{suffix}", "prefix 'www-'"),
-        (f"{label}-portail{suffix}", "suffix '-portail'"),
-        (f"{label}-connect{suffix}", "suffix '-connect'"),
-    ]:
-        candidates.append((tpl, rule))
-
-    # Gouv variant (.gov → .gouv).
-    if ".gov." in suffix:
+    # Merged-hyphen variants combining the gov/gouv path label into the
+    # second-level label on the free TLD.
+    if ".gov." in full_suffix or full_suffix == ".gov":
         candidates.append(
-            (label + suffix.replace(".gov.", ".gouv.", 1), "TLD path .gov → .gouv")
+            (f"{label}-gov{base_tld}", "merge .gov as hyphen suffix on free TLD")
         )
+        candidates.append(
+            (f"{label}-gouv{base_tld}", "merge .gouv as hyphen suffix on free TLD")
+        )
+
+    # Level-strip: telemo.gn from telemo.gov.gn.
+    if full_suffix != base_tld and full_suffix:
+        candidates.append((label + base_tld, "drop intermediate subdomain levels"))
+
+    # ── Other intermediate TLDs (.gov.gn, .gouv.gn) — gated on WHOIS ──
+    intermediate_tlds: list[str] = []
+    if full_suffix and full_suffix != base_tld:
+        intermediate_tlds.append(full_suffix)
+        if ".gov." in full_suffix:
+            intermediate_tlds.append(full_suffix.replace(".gov.", ".gouv.", 1))
+
+    for suffix in intermediate_tlds:
+        if check_domain_restriction(suffix):
+            continue  # Restricted — attacker cannot register, drop variants.
+        for variant_label, rule in _homoglyph_variants(label):
+            candidates.append((variant_label + suffix, f"{rule} on {suffix}"))
+        for variant_label, rule in _hyphen_variants(label):
+            candidates.append((variant_label + suffix, f"{rule} on {suffix}"))
+        for tpl, rule in [
+            (f"www-{label}{suffix}", f"prefix 'www-' on {suffix}"),
+            (f"{label}-portail{suffix}", f"suffix '-portail' on {suffix}"),
+            (f"{label}-connect{suffix}", f"suffix '-connect' on {suffix}"),
+        ]:
+            candidates.append((tpl, rule))
 
     # Dedupe while preserving order, cap at MAX_TYPOSQUATS.
     seen: set[str] = set()
@@ -355,11 +421,28 @@ def generate_typosquats(domain: str) -> list[tuple[str, str]]:
     return unique
 
 
+def _collect_excluded_restricted_tlds(domain: str) -> list[str]:
+    """Return the list of intermediate TLDs that were excluded from
+    generate_typosquats() because they are Restricted Domains. Used in
+    the synthesis finding evidence/explanation."""
+    _, full_suffix, base_tld = _split_domain(domain)
+    excluded: list[str] = []
+    if full_suffix and full_suffix != base_tld:
+        if check_domain_restriction(full_suffix):
+            excluded.append(full_suffix)
+        if ".gov." in full_suffix:
+            gouv = full_suffix.replace(".gov.", ".gouv.", 1)
+            if check_domain_restriction(gouv):
+                excluded.append(gouv)
+    return excluded
+
+
 def typosquat_findings(target: str) -> list[Finding]:
     """Build one HIGH finding per typosquat + a CRITICAL synthesis finding."""
     findings: list[Finding] = []
     host = normalize_host(target)
     variants = generate_typosquats(host)
+    excluded_tlds = _collect_excluded_restricted_tlds(host)
     for variant, rule in variants:
         findings.append(_make(
             target,
@@ -372,13 +455,25 @@ def typosquat_findings(target: str) -> list[Finding]:
             sprint=4,
         ))
     if variants:
+        if excluded_tlds:
+            excluded_text = (
+                f" {', '.join(excluded_tlds)} sont des Restricted Domains "
+                f"(WhoisFreaks) — variantes sur ces TLDs exclues car non "
+                f"enregistrables par des tiers."
+            )
+        else:
+            excluded_text = ""
         findings.append(_make(
             target,
-            f"{len(variants)} typosquat variants identified — phishing delivery surface",
-            f"{len(variants)} variantes typosquat ont été générées pour {host} — "
-            "à corréler avec l'absence/faiblesse SPF/DMARC du Sprint 2.",
+            f"{len(variants)} typosquat variants — TLD libre d'enregistrement",
+            f"{len(variants)} variantes typosquat sur TLD libre identifiées "
+            f"pour {host}.{excluded_text} À corréler avec DMARC p=none + "
+            f"DNSSEC absent du Sprint 2.",
             "CRITICAL",
-            evidence=[f"variants={[v for v, _ in variants]}"],
+            evidence=[
+                f"variants={[v for v, _ in variants]}",
+                f"excluded_restricted_tlds={excluded_tlds}",
+            ],
             flags=["PHISHING_VECTOR", "CHAIN_DEPENDENCY"],
             sprint=4,
         ))

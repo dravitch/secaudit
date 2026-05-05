@@ -17,6 +17,37 @@ from tools import phishing_surface as ps
 URL = "https://127.0.0.1"
 HOST = "127.0.0.1"
 
+
+@pytest.fixture(autouse=True)
+def _seed_whois_cache(monkeypatch):
+    """Pre-fill the typosquat WHOIS cache so no test hits the real network.
+    Mirrors the live ground truth confirmed on whoisfreaks.com :
+      .gov.gn  → Restricted Domain
+      .gouv.gn → Restricted Domain
+      .gn      → registrable
+    """
+    cache = {
+        "gov.gn": True,
+        "gouv.gn": True,
+        "gn": False,
+        # Tests against 127.0.0.1 land on the suffix '.0.1'/etc — mark
+        # everything else registrable so we never go to the network.
+    }
+    monkeypatch.setattr(ps, "_DOMAIN_RESTRICTION_CACHE", dict(cache))
+    # Belt-and-braces: replace the function to refuse any uncached lookup
+    # rather than hitting the real WhoisFreaks endpoint during tests.
+    real = ps.check_domain_restriction
+
+    def fake(tld, **kw):
+        key = tld.lstrip(".")
+        if key in ps._DOMAIN_RESTRICTION_CACHE:
+            return ps._DOMAIN_RESTRICTION_CACHE[key]
+        # Default to registrable so test-only TLDs (127.0.0.1 → ".0.1") behave.
+        ps._DOMAIN_RESTRICTION_CACHE[key] = False
+        return False
+
+    monkeypatch.setattr(ps, "check_domain_restriction", fake)
+
 LOGIN_HTML_POST = """
 <html><body>
   <form id="loginform" method="POST" action="/auth/submit">
@@ -230,26 +261,81 @@ def test_favicon_404_yields_info_absent():
 # ── Typosquat generator ──────────────────────────────────────────────
 
 
-def test_typosquat_generates_at_least_10_for_telemo():
+def test_typosquat_generates_filtered_variants_for_telemo():
+    """With .gov.gn and .gouv.gn marked Restricted (autouse fixture), we
+    expect ~6 variants on the free .gn TLD: 3 homoglyphs + 2 merged-hyphen
+    + 1 level-strip. No variant should remain on a restricted TLD."""
     variants = ps.generate_typosquats("telemo.gov.gn")
-    assert len(variants) >= 10, f"expected >=10 variants, got {len(variants)}"
-    assert len(variants) <= ps.MAX_TYPOSQUATS
     domains = {v for v, _ in variants}
-    # Spot-check expected categories.
-    assert any(d.endswith(".gn") and ".gov." not in d for d in domains), \
-        "expected at least one level-strip variant (.gov dropped)"
-    assert any(d.startswith("www-") for d in domains), \
-        "expected the www- prefix variant"
-    assert any(".gouv.gn" in d for d in domains), \
-        "expected the .gouv variant"
-    assert any("-" in d.split(".")[0] for d in domains), \
-        "expected at least one hyphen-insertion variant"
+
+    assert 5 <= len(variants) <= ps.MAX_TYPOSQUATS
+    # No variants on the restricted TLDs.
+    assert not any(d.endswith(".gov.gn") for d in domains), \
+        "no variant should remain on .gov.gn (Restricted Domain)"
+    assert not any(".gouv.gn" in d for d in domains), \
+        "no variant should remain on .gouv.gn (Restricted Domain)"
+
+    # Level-strip variant.
+    assert "telemo.gn" in domains, "expected the level-strip variant telemo.gn"
+    # Merged-hyphen variants.
+    assert "telemo-gov.gn" in domains, "expected merged-hyphen variant telemo-gov.gn"
+    assert "telemo-gouv.gn" in domains, "expected merged-hyphen variant telemo-gouv.gn"
+    # At least one homoglyph on .gn (e.g. t3lemo.gn / te1emo.gn / telem0.gn).
+    assert any(
+        d.endswith(".gn") and d != "telemo.gn" and not d.startswith("telemo-")
+        for d in domains
+    ), "expected at least one homoglyph variant on .gn"
 
 
 def test_typosquat_homoglyph_substitutions():
     variants = ps.generate_typosquats("telemo.gov.gn")
     rules = " ".join(rule for _, rule in variants)
     assert "homoglyph" in rules
+
+
+def test_typosquat_excludes_restricted_tlds(monkeypatch):
+    """Mock check_domain_restriction → True for .gov.gn, .gouv.gn — assert
+    no variant ends on those TLDs and the .gn variants are still emitted."""
+    fake_cache = {"gov.gn": True, "gouv.gn": True, "gn": False}
+    monkeypatch.setattr(ps, "_DOMAIN_RESTRICTION_CACHE", dict(fake_cache))
+
+    def restricted_for_gov(tld, **kw):
+        return ps._DOMAIN_RESTRICTION_CACHE.get(tld.lstrip("."), False)
+
+    monkeypatch.setattr(ps, "check_domain_restriction", restricted_for_gov)
+
+    variants = ps.generate_typosquats("telemo.gov.gn")
+    domains = {v for v, _ in variants}
+    assert not any(".gov.gn" in d for d in domains)
+    assert not any(".gouv.gn" in d for d in domains)
+    assert all(d.endswith(".gn") for d in domains)
+    # The free-TLD essentials are still there.
+    assert {"telemo.gn", "telemo-gov.gn", "telemo-gouv.gn"} <= domains
+
+
+def test_typosquat_keeps_variants_when_tld_not_restricted(monkeypatch):
+    """Positive control: when the WHOIS lookup says the intermediate TLD
+    is registrable, we DO emit variants on it (homoglyph + hyphen +
+    prefix/suffix)."""
+    monkeypatch.setattr(ps, "_DOMAIN_RESTRICTION_CACHE", {"co.uk": False, "uk": False})
+    monkeypatch.setattr(
+        ps, "check_domain_restriction",
+        lambda tld, **kw: ps._DOMAIN_RESTRICTION_CACHE.get(tld.lstrip("."), False),
+    )
+    variants = ps.generate_typosquats("acme.co.uk")
+    domains = {v for v, _ in variants}
+    # Some variant on the non-restricted intermediate TLD must survive.
+    assert any(d.endswith(".co.uk") and d != "acme.co.uk" for d in domains)
+
+
+def test_typosquat_synthesis_text_mentions_restricted_tlds():
+    """Synthesis finding must explain why .gov.gn / .gouv.gn variants were
+    excluded so the auditor doesn't think the generator is broken."""
+    findings = ps.typosquat_findings("https://telemo.gov.gn")
+    crit = [f for f in findings if f.severity == "CRITICAL"]
+    assert len(crit) == 1
+    assert "Restricted" in crit[0].finding
+    assert ".gov.gn" in crit[0].finding or ".gouv.gn" in crit[0].finding
 
 
 def test_typosquat_no_duplicates_and_skips_self():
