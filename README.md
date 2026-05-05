@@ -10,6 +10,8 @@ Site de référence initial : `https://telemo.gov.gn` (portail marchés publics
 Guinée). Les résultats de scan restent **strictement privés** : jamais
 committés, jamais pushés.
 
+<img width="1000" height="383" alt="image" src="https://github.com/user-attachments/assets/9b78f798-9fa3-46a9-98e7-00d7bd3bb547" />
+
 ## Structure du repo
 
 ```
