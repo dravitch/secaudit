@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import pytest
 
-from tools._tld_verifier import TLDVerifier, _verdict
+from tools._tld_verifier import TLDVerifier, _consensus
 
 
 def _make(iana, whoisfreaks, dns_soa) -> TLDVerifier:
@@ -25,17 +25,18 @@ def _make(iana, whoisfreaks, dns_soa) -> TLDVerifier:
     )
 
 
-# ── Vote-tally rules ─────────────────────────────────────────────────
+# ── Vote-tally rules (weighted: IANA=2, others=1) ────────────────────
 
 
-def test_restricted_when_two_of_three_confirm():
-    """iana=True, whoisfreaks=True, dns_soa=False → 2/3 = 0.67 → RESTRICTED."""
+def test_restricted_when_iana_and_whoisfreaks_confirm():
+    """iana=True (w2) + whoisfreaks=True (w1) + dns_soa=False (w1) →
+    score 3 vs 1 = 0.75 → RESTRICTED."""
     v = _make(iana=True, whoisfreaks=True, dns_soa=False)
     r = v.check("gov.gn")
     assert r["verdict"] == "RESTRICTED"
     assert r["votes_restricted"] == 2
     assert r["votes_available"] == 3
-    assert abs(r["confidence"] - 0.667) < 0.01
+    assert r["confidence"] >= 0.60
 
 
 def test_free_when_all_deny():
@@ -48,13 +49,26 @@ def test_free_when_all_deny():
     assert r["confidence"] == 0.0
 
 
-def test_unknown_when_one_of_three_confirms():
-    """iana=True, whoisfreaks=False, dns_soa=False → 1/3 = 0.33 → UNKNOWN."""
+def test_iana_alone_against_two_negatives_yields_unknown():
+    """iana=True (w2) + whoisfreaks=False (w1) + dns_soa=False (w1) →
+    score 2 vs 2 = 0.5 → UNKNOWN. Even with IANA's weight, two negatives
+    must produce caution rather than flip the verdict."""
     v = _make(iana=True, whoisfreaks=False, dns_soa=False)
     r = v.check("ambiguous.tld")
     assert r["verdict"] == "UNKNOWN"
     assert r["votes_restricted"] == 1
     assert r["votes_available"] == 3
+
+
+def test_iana_with_one_unknown_still_restricted_when_other_neutral():
+    """Live shape for gov.gn: iana=True (w2) + whoisfreaks=False (w1) +
+    dns_soa=None → 2 sources reachable, score 2 vs 1 = 0.67 → RESTRICTED.
+    This is the regression fix for the original WhoisFreaks-only failure."""
+    v = _make(iana=True, whoisfreaks=False, dns_soa=None)
+    r = v.check("gov.gn")
+    assert r["verdict"] == "RESTRICTED"
+    assert r["votes_restricted"] == 1
+    assert r["votes_available"] == 2
 
 
 def test_unknown_when_all_sources_fail():
@@ -71,7 +85,7 @@ def test_unknown_when_two_fail_one_confirms():
 
     Single-source consensus was the original WhoisFreaks bug — the verifier
     refuses to declare RESTRICTED on votes_available < 2 no matter what
-    the lone source says.
+    the lone source says, even if it's the high-weight IANA source.
     """
     v = _make(iana=True, whoisfreaks=None, dns_soa=None)
     r = v.check("flaky.tld")
@@ -80,24 +94,30 @@ def test_unknown_when_two_fail_one_confirms():
     assert r["votes_available"] == 1
 
 
-# ── Edge cases on _verdict directly ──────────────────────────────────
+# ── Edge cases on _consensus directly ────────────────────────────────
 
 
 @pytest.mark.parametrize(
-    "votes_restricted,votes_available,expected_verdict",
+    "sources,expected_verdict",
     [
-        (0, 0, "UNKNOWN"),  # nothing reached
-        (1, 1, "UNKNOWN"),  # single-source confirm — refuse
-        (0, 2, "FREE"),
-        (1, 2, "UNKNOWN"),  # 1/2 = 0.5
-        (2, 2, "RESTRICTED"),
-        (2, 3, "RESTRICTED"),  # 2/3 = 0.67
-        (1, 3, "UNKNOWN"),  # 1/3 = 0.33
-        (3, 3, "RESTRICTED"),
+        # 0 sources → UNKNOWN
+        ({"iana": None, "whoisfreaks": None, "dns_soa": None}, "UNKNOWN"),
+        # 1 source available — single-source guard
+        ({"iana": True, "whoisfreaks": None, "dns_soa": None}, "UNKNOWN"),
+        ({"iana": False, "whoisfreaks": None, "dns_soa": None}, "UNKNOWN"),
+        # 2 sources, both deny → FREE
+        ({"iana": False, "whoisfreaks": False, "dns_soa": None}, "FREE"),
+        # IANA + 1 neutral with True vs False heuristic
+        ({"iana": True, "whoisfreaks": False, "dns_soa": None}, "RESTRICTED"),  # 2 vs 1 = 0.67
+        ({"iana": False, "whoisfreaks": True, "dns_soa": None}, "UNKNOWN"),     # 1 vs 2 = 0.33
+        # Three sources: all True
+        ({"iana": True, "whoisfreaks": True, "dns_soa": True}, "RESTRICTED"),
+        # Mixed — 1 weak True against 2 strong contradicts
+        ({"iana": False, "whoisfreaks": True, "dns_soa": False}, "FREE"),       # 1 vs 3 = 0.25
     ],
 )
-def test_verdict_thresholds(votes_restricted, votes_available, expected_verdict):
-    verdict, _ = _verdict(votes_restricted, votes_available)
+def test_consensus_thresholds(sources, expected_verdict):
+    verdict, _, _, _ = _consensus(sources)
     assert verdict == expected_verdict
 
 
@@ -156,6 +176,18 @@ def test_iana_recognises_known_gov_second_level_label_without_network():
     assert _check_iana("mil.us") is True
     # Non-governmental 2nd-level → indeterminate (None) for this source.
     assert _check_iana("blog.gn") is None
+
+
+def test_dns_soa_returns_none_for_top_level_tld():
+    """Live observation regression: the SOA mname of a ccTLD root may be
+    hosted on a national NIC under a .gov subdomain — that does NOT mean
+    the TLD itself is restricted. The DNS SOA source must therefore stay
+    silent (None) for any single-label TLD, whatever dig returns."""
+    from tools._tld_verifier import _check_dns_soa
+
+    assert _check_dns_soa("gn") is None
+    assert _check_dns_soa(".gn") is None
+    assert _check_dns_soa("us") is None
 
 
 # ── Integration tests (opt-in) ───────────────────────────────────────

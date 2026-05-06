@@ -137,14 +137,19 @@ def _check_whoisfreaks(tld: str) -> Optional[bool]:
 def _check_dns_soa(tld: str) -> Optional[bool]:
     """Source 3: dig SOA <tld> and inspect the mname for governmental tokens.
 
-    Restricted TLDs (gov.<cc>) typically have their SOA hosted on a
-    government registry whose nameserver name contains tokens like
-    'gov.', 'ministry', etc. Non-governmental TLDs have neutral mnames.
+    Restricted 2nd-level TLDs (gov.<cc>) typically have their SOA hosted on
+    a government registry whose mname contains 'gov.', 'ministry', etc.
 
-    Returns None if the SOA query fails / no record (we can't tell), True
-    if the SOA mname matches a governmental token, False otherwise.
+    Top-level TLDs (single label like 'gn') are excluded from this check :
+    a ccTLD's root SOA may be hosted by ANY operator (often a national NIC
+    that itself sits under a .gov subdomain) without implying the TLD is
+    restricted. Live observation: dig SOA gn returns nameservers under
+    nic.gov.* → matched 'gov.' → false positive RESTRICTED on .gn.
     """
     key = tld.lstrip(".")
+    if "." not in key:
+        # Top-level TLD — SOA mname is not a reliable restriction signal.
+        return None
     try:
         result = subprocess.run(
             ["dig", "+short", "SOA", key],
@@ -163,27 +168,58 @@ def _check_dns_soa(tld: str) -> Optional[bool]:
     return False
 
 
-# ── Verdict logic ────────────────────────────────────────────────────
+# ── Verdict logic — weighted consensus ───────────────────────────────
 
 
-def _verdict(votes_restricted: int, votes_available: int) -> tuple[str, float]:
-    """Compute (verdict, confidence) from raw vote counts.
+# IANA carries weight 2 because for known governmental 2nd-level labels
+# (gov/gouv/mil/edu/...) it returns True via a deterministic ICANN-policy
+# rule, not a scrape. WhoisFreaks and DNS SOA each scrape/heuristic-check
+# a single endpoint, so they get weight 1.
+SOURCE_WEIGHTS: dict[str, int] = {"iana": 2, "whoisfreaks": 1, "dns_soa": 1}
 
-    Rules:
-      - votes_available < 2          → UNKNOWN, confidence=0.0
-      - 2/3 ≤ ratio                  → RESTRICTED
-      - 1/3 ≤ ratio < 2/3            → UNKNOWN
-      - ratio < 1/3                  → FREE
+# Confidence thresholds (weighted score_for / score_total).
+THRESHOLD_RESTRICTED = 0.60
+THRESHOLD_UNKNOWN = 0.30
+
+
+def _consensus(sources: dict[str, Optional[bool]]) -> tuple[str, float, int, int]:
+    """Compute (verdict, confidence, votes_restricted, votes_available).
+
+    Voting is weighted by SOURCE_WEIGHTS — IANA's deterministic ICANN-policy
+    rule for known governmental 2nd-levels carries weight 2; the other
+    heuristic sources carry weight 1 each. With at least 2 sources reachable
+    (the single-source-bias guard), the rules are :
+
+      - score_for / total ≥ 0.60 → RESTRICTED
+      - score_for / total ≥ 0.30 → UNKNOWN
+      - else                     → FREE
+
+    `votes_restricted` and `votes_available` are unweighted counts kept for
+    display in the verdict dict.
     """
+    votes_restricted = sum(1 for v in sources.values() if v is True)
+    votes_available = sum(1 for v in sources.values() if v is not None)
     if votes_available < 2:
-        return "UNKNOWN", 0.0
-    confidence = votes_restricted / votes_available
-    # Use integer math for the threshold so 1/3 and 2/3 land where expected.
-    if votes_restricted * 3 >= votes_available * 2:
-        return "RESTRICTED", confidence
-    if votes_restricted * 3 >= votes_available:
-        return "UNKNOWN", confidence
-    return "FREE", confidence
+        return "UNKNOWN", 0.0, votes_restricted, votes_available
+
+    score_for = sum(
+        SOURCE_WEIGHTS.get(name, 1) for name, v in sources.items() if v is True
+    )
+    score_against = sum(
+        SOURCE_WEIGHTS.get(name, 1) for name, v in sources.items() if v is False
+    )
+    total = score_for + score_against
+    if total == 0:
+        return "UNKNOWN", 0.0, votes_restricted, votes_available
+
+    confidence = score_for / total
+    if confidence >= THRESHOLD_RESTRICTED:
+        verdict = "RESTRICTED"
+    elif confidence >= THRESHOLD_UNKNOWN:
+        verdict = "UNKNOWN"
+    else:
+        verdict = "FREE"
+    return verdict, confidence, votes_restricted, votes_available
 
 
 # ── Public verifier ──────────────────────────────────────────────────
@@ -219,9 +255,7 @@ class TLDVerifier:
             "whoisfreaks": _safe(self._whoisfreaks, key),
             "dns_soa": _safe(self._dns_soa, key),
         }
-        votes_restricted = sum(1 for v in sources.values() if v is True)
-        votes_available = sum(1 for v in sources.values() if v is not None)
-        verdict, confidence = _verdict(votes_restricted, votes_available)
+        verdict, confidence, votes_restricted, votes_available = _consensus(sources)
 
         result = {
             "tld": key,
