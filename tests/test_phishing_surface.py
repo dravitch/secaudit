@@ -19,34 +19,25 @@ HOST = "127.0.0.1"
 
 
 @pytest.fixture(autouse=True)
-def _seed_whois_cache(monkeypatch):
-    """Pre-fill the typosquat WHOIS cache so no test hits the real network.
-    Mirrors the live ground truth confirmed on whoisfreaks.com :
-      .gov.gn  → Restricted Domain
-      .gouv.gn → Restricted Domain
-      .gn      → registrable
+def _stub_is_restricted(monkeypatch):
+    """Bypass the multi-source TLDVerifier for all phishing tests.
+
+    Mirrors the ground truth confirmed live :
+      .gov.gn  → RESTRICTED
+      .gouv.gn → RESTRICTED
+      .gn      → FREE
+    Anything else (test-only TLDs like .0.1 from 127.0.0.1) → not restricted
+    so we never hit the real IANA / WhoisFreaks / dig endpoints.
     """
-    cache = {
-        "gov.gn": True,
-        "gouv.gn": True,
-        "gn": False,
-        # Tests against 127.0.0.1 land on the suffix '.0.1'/etc — mark
-        # everything else registrable so we never go to the network.
-    }
-    monkeypatch.setattr(ps, "_DOMAIN_RESTRICTION_CACHE", dict(cache))
-    # Belt-and-braces: replace the function to refuse any uncached lookup
-    # rather than hitting the real WhoisFreaks endpoint during tests.
-    real = ps.check_domain_restriction
+    restricted = {"gov.gn", "gouv.gn"}
 
-    def fake(tld, **kw):
-        key = tld.lstrip(".")
-        if key in ps._DOMAIN_RESTRICTION_CACHE:
-            return ps._DOMAIN_RESTRICTION_CACHE[key]
-        # Default to registrable so test-only TLDs (127.0.0.1 → ".0.1") behave.
-        ps._DOMAIN_RESTRICTION_CACHE[key] = False
-        return False
+    def fake(tld):
+        return tld.lstrip(".").lower() in restricted
 
-    monkeypatch.setattr(ps, "check_domain_restriction", fake)
+    monkeypatch.setattr(ps, "_is_restricted", fake)
+    # Reset the lazy verifier singleton so a follow-up integration run
+    # (different process) is not influenced by test state.
+    monkeypatch.setattr(ps, "_TLD_VERIFIER", None)
 
 LOGIN_HTML_POST = """
 <html><body>
@@ -294,15 +285,13 @@ def test_typosquat_homoglyph_substitutions():
 
 
 def test_typosquat_excludes_restricted_tlds(monkeypatch):
-    """Mock check_domain_restriction → True for .gov.gn, .gouv.gn — assert
-    no variant ends on those TLDs and the .gn variants are still emitted."""
-    fake_cache = {"gov.gn": True, "gouv.gn": True, "gn": False}
-    monkeypatch.setattr(ps, "_DOMAIN_RESTRICTION_CACHE", dict(fake_cache))
-
-    def restricted_for_gov(tld, **kw):
-        return ps._DOMAIN_RESTRICTION_CACHE.get(tld.lstrip("."), False)
-
-    monkeypatch.setattr(ps, "check_domain_restriction", restricted_for_gov)
+    """Mock _is_restricted → True for .gov.gn, .gouv.gn — assert no variant
+    ends on those TLDs and the .gn variants are still emitted."""
+    restricted = {"gov.gn", "gouv.gn"}
+    monkeypatch.setattr(
+        ps, "_is_restricted",
+        lambda tld: tld.lstrip(".").lower() in restricted,
+    )
 
     variants = ps.generate_typosquats("telemo.gov.gn")
     domains = {v for v, _ in variants}
@@ -314,14 +303,10 @@ def test_typosquat_excludes_restricted_tlds(monkeypatch):
 
 
 def test_typosquat_keeps_variants_when_tld_not_restricted(monkeypatch):
-    """Positive control: when the WHOIS lookup says the intermediate TLD
-    is registrable, we DO emit variants on it (homoglyph + hyphen +
-    prefix/suffix)."""
-    monkeypatch.setattr(ps, "_DOMAIN_RESTRICTION_CACHE", {"co.uk": False, "uk": False})
-    monkeypatch.setattr(
-        ps, "check_domain_restriction",
-        lambda tld, **kw: ps._DOMAIN_RESTRICTION_CACHE.get(tld.lstrip("."), False),
-    )
+    """Positive control: when the verifier says the intermediate TLD is
+    registrable, we DO emit variants on it (homoglyph + hyphen + prefix/
+    suffix)."""
+    monkeypatch.setattr(ps, "_is_restricted", lambda tld: False)
     variants = ps.generate_typosquats("acme.co.uk")
     domains = {v for v, _ in variants}
     # Some variant on the non-restricted intermediate TLD must survive.

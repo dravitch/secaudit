@@ -1,0 +1,6 @@
+[tool.pytest.ini_options]
+markers = [
+    "integration: real-network test (skipped by default; opt-in with -m integration)",
+]
+# Default: skip integration tests so CI / fresh checkouts stay offline.
+addopts = "-m 'not integration'"
